@@ -1,0 +1,19 @@
+*.pyc
+*.so
+output/
+data/
+work_dirs/
+compiler/*
+build/
+bst_deploy/
+ckpts/
+compiler/
+
+# keep
+!bstnnx_cpp2py_export.cpython-37m-x86_64-linux-gnu.so
+!compiler/fastbev_backbone_a1000.yaml
+!compiler/fastbev_backbone_c1200.yaml
+!compiler/fastbev_head_a1000.yaml
+!compiler/fastbev_head_c1200.yaml
+!compiler/fastbev_backbone.onnx
+!compiler/fastbev_head.onnx

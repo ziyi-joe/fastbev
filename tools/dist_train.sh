@@ -1,0 +1,1 @@
+NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m torch.distributed.launch --nproc=0 --nproc_per_node=8 tools/train.py ./configs/fastbev/exp/paper/fastbev_m0_r18_s256x704_v200x200x4_c192_d2_f4.py --work-dir=./work_dirs/train/nuscenes_mini --launcher="pytorch" --gpus 8
