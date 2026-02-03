@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/types.h>

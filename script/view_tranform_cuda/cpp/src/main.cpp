@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <iostream>
 #include <vector>
 #include "view_transformer.hpp"

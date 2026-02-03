@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include "voxelization.h"
 

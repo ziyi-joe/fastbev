@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/paconv_lib/src/gpu
 
 #include <math.h>

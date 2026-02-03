@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include "cuda_accelerated_functions_project_v3.h"
 #include <cuda.h>
 #include "stdio.h"

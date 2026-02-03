@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include "tensor.hpp"
 #include <memory>
 #include <cstring>

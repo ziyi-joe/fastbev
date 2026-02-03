@@ -86,6 +86,7 @@ mmdet3d/.mim/configs/dynamic_voxelization/dv_pointpillars_secfpn_6x8_160e_kitti-
 mmdet3d/.mim/configs/dynamic_voxelization/dv_second_secfpn_2x8_cosine_80e_kitti-3d-3class.py
 mmdet3d/.mim/configs/dynamic_voxelization/dv_second_secfpn_6x8_80e_kitti-3d-car.py
 mmdet3d/.mim/configs/dynamic_voxelization/metafile.yml
+mmdet3d/.mim/configs/fastbev/exp/paper/fastbev_m0_r18_s256x704_v128x128x4_c192_d2_f4_train.py
 mmdet3d/.mim/configs/fastbev/exp/paper/fastbev_m0_r18_s256x704_v200x200x4_c192_d2_f4.py
 mmdet3d/.mim/configs/fastbev/exp/paper/fastbev_m0_r18_s256x704_v200x200x4_c192_d2_f4_train.py
 mmdet3d/.mim/configs/fastbev/exp/paper/fastbev_m1_r18_s320x880_v200x200x4_c192_d2_f4.py

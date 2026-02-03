@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 // Copyright 2019 Yan Yan
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

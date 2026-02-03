@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 // Modified from
 // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/ball_query_gpu.cu
 

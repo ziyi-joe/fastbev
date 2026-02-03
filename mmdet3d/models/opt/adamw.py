@@ -108,18 +108,9 @@ class AdamW2(Optimizer):
                 # record the step after step update
                 state_steps.append(state['step'])
 
-            # F.adamw(params_with_grad,
-            #         grads,
-            #         exp_avgs,
-            #         exp_avg_sqs,
-            #         max_exp_avg_sqs,
-            #         state_steps,
-            #         amsgrad,
-            #         beta1,
-            #         beta2,
-            #         group['lr'],
-            #         group['weight_decay'],
-            #         group['eps'])
+
+            if len(state_steps) > 0 and not isinstance(state_steps[0], torch.Tensor):
+                state_steps = [torch.tensor(s, dtype=torch.float32, device='cpu') for s in state_steps]
             F.adamw(params_with_grad,
                     grads,
                     exp_avgs,
@@ -131,6 +122,7 @@ class AdamW2(Optimizer):
                     beta2=beta2,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
-                    eps=group['eps'])
+                    eps=group['eps'],
+                    maximize=False)
 
         return loss

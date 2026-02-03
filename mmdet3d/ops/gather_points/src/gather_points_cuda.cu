@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <stdio.h>
 #include <stdlib.h>
 
