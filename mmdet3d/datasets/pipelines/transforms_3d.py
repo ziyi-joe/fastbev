@@ -462,6 +462,11 @@ class ObjectRangeFilter(object):
         gt_bboxes_3d = input_dict['gt_bboxes_3d']
         gt_labels_3d = input_dict['gt_labels_3d']
         mask = gt_bboxes_3d.in_range_bev(bev_range)
+        # 只保留前向45度范围内的
+        import torch
+        bbox_angle = torch.atan2(gt_bboxes_3d.center[:, 0], gt_bboxes_3d.center[:, 1])
+        fov_mask = abs(bbox_angle) < torch.pi / 6.0
+        mask = mask * fov_mask
         gt_bboxes_3d = gt_bboxes_3d[mask]
         # mask is a torch tensor but gt_labels_3d is still numpy array
         # using mask to index gt_labels_3d will cause bug when

@@ -39,7 +39,8 @@ class NuScenesMultiViewDataset(MultiViewMixin, NuScenesDataset):
                 intrinsic=np.eye(4, dtype=np.float32),
                 lidar2img_aug=data_info['lidar2img_aug'],
                 lidar2img_extra=data_info['lidar2img_extra']
-            )
+            ),
+            vis_info=data_info['vis_info']
         )
         if 'ann_info' in data_info:
             gt_bboxes_3d = data_info['ann_info']['gt_bboxes_3d']

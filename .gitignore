@@ -8,6 +8,7 @@ build/
 bst_deploy/
 ckpts/
 compiler/
+pretrained_models/
 
 # keep
 !bstnnx_cpp2py_export.cpython-37m-x86_64-linux-gnu.so

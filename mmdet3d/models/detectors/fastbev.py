@@ -22,6 +22,7 @@ import onnxruntime as ort
 import shutil
 # import bstnnx
 
+dump_id = None
 @DETECTORS.register_module()
 class FastBEV(BaseDetector):
     def __init__(
@@ -163,10 +164,10 @@ class FastBEV(BaseDetector):
 
         ###################### backbone resnet + fpn ######################
         if mode in ['test', 'train', 'test_pth']:
+            # 把所有图像统一处理
             x = self.backbone(
                 img
-            )  # [6, 256, 232, 400]; [6, 512, 116, 200]; [6, 1024, 58, 100]; [6, 2048, 29, 50]
-
+            )  # [N, 64, 64, 176], [N, 128, 32, 88], [N, 256, 16, 44], [N, 512, 8, 22]
             # use for vovnet
             if isinstance(x, dict):
                 tmp = []
@@ -177,16 +178,17 @@ class FastBEV(BaseDetector):
             # fuse features
             def _inner_forward(x):
                 out = self.neck(x)
-                return out  # [6, 64, 232, 400]; [6, 64, 116, 200]; [6, 64, 58, 100]; [6, 64, 29, 50])
+                return out
 
             if self.with_cp and x.requires_grad:
                 mlvl_feats = cp.checkpoint(_inner_forward, x)
             else:
+                # 出来的H，W没变，C全部变成64
                 mlvl_feats = _inner_forward(x)
             mlvl_feats = list(mlvl_feats)
 
             features_2d = None
-            if self.bbox_head_2d:
+            if self.bbox_head_2d: # None
                 features_2d = mlvl_feats
 
             if self.multi_scale_id is not None:
@@ -195,6 +197,7 @@ class FastBEV(BaseDetector):
                     # fpn output fusion
                     if getattr(self, f'neck_fuse_{msid}', None) is not None:
                         fuse_feats = [mlvl_feats[msid]]
+                        # 全部resize成[N, 16, 64, 176]
                         for i in range(msid + 1, len(mlvl_feats)):
                             resized_feat = resize(
                                 mlvl_feats[i], 
@@ -206,12 +209,12 @@ class FastBEV(BaseDetector):
                             fuse_feats = torch.cat(fuse_feats, dim=1)
                         else:
                             fuse_feats = fuse_feats[0]
+                        # [N, 64*4, 64, 176] -> [N, 64, 64, 176]
                         fuse_feats = getattr(self, f'neck_fuse_{msid}')(fuse_feats)
                         mlvl_feats_.append(fuse_feats)
                     else:
                         mlvl_feats_.append(mlvl_feats[msid])
-            mlvl_feats = mlvl_feats_  # 24, 64, 64, 176 -> 每一帧的2d特征
-
+            mlvl_feats = mlvl_feats_  # N, 64, 64, 176 -> 每一张图的2d特征
         elif mode == 'test_onnx':
             all_outputs = []
             for i in range(img.size(0)):
@@ -225,19 +228,20 @@ class FastBEV(BaseDetector):
         ###################### backbone resnet + fpn ######################
         
         ###################### 2d -> 3d ######################
-        # v3 bev ms
+        # v3 bev ms(No)
         if isinstance(self.n_voxels, list) and len(mlvl_feats) < len(self.n_voxels):
             pad_feats = len(self.n_voxels) - len(mlvl_feats)
             for _ in range(pad_feats):
                 mlvl_feats.append(mlvl_feats[0])
 
+        # 从图像空间投影到
         mlvl_volumes = []
-        for lvl, mlvl_feat in enumerate(mlvl_feats):  # 24,64,64,176
+        for lvl, mlvl_feat in enumerate(mlvl_feats):
             stride_i = math.ceil(img.shape[-1] / mlvl_feat.shape[-1])  # P4 880 / 32 = 27.5
             # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
             mlvl_feat = mlvl_feat.reshape([batch_size, -1] + list(mlvl_feat.shape[1:]))  # 1,24,64,64,176
-            # [bs, seq*nv, c, h, w] -> list([bs, nv, c, h, w])
-            mlvl_feat_split = torch.split(mlvl_feat, 6, dim=1)  # 1, 6, 64, 64, 176 * 4(seq)
+            # 按帧分开，[bs, seq*nv, c, h, w] -> list([bs, nv, c, h, w])
+            mlvl_feat_split = torch.split(mlvl_feat, 2, dim=1)
 
             volume_list = []
             for seq_id in range(len(mlvl_feat_split)):
@@ -245,13 +249,14 @@ class FastBEV(BaseDetector):
                 for batch_id, seq_img_meta in enumerate(img_metas):
                     feat_i = mlvl_feat_split[seq_id][batch_id]  # [nv, c, h, w]
                     img_meta = copy.deepcopy(seq_img_meta)
-                    img_meta["lidar2img"]["extrinsic"] = img_meta["lidar2img"]["extrinsic"][seq_id*6:(seq_id+1)*6]
+                    img_meta["lidar2img"]["extrinsic"] = img_meta["lidar2img"]["extrinsic"][seq_id*2:(seq_id+1)*2]
                     if isinstance(img_meta["img_shape"], list):
-                        img_meta["img_shape"] = img_meta["img_shape"][seq_id*6:(seq_id+1)*6]
+                        img_meta["img_shape"] = img_meta["img_shape"][seq_id*2:(seq_id+1)*2]
                         img_meta["img_shape"] = img_meta["img_shape"][0]
                     height = math.ceil(img_meta["img_shape"][0] / stride_i)
                     width = math.ceil(img_meta["img_shape"][1] / stride_i)
 
+                    # 通过内外参，计算3D空间中某个点在图像上的哪个像素
                     projection = self._compute_projection(
                         img_meta, stride_i, noise=self.extrinsic_noise).to(feat_i.device)
                     if self.style in ['v1', 'v2']:
@@ -260,6 +265,7 @@ class FastBEV(BaseDetector):
                     else:
                         # v3/v4 bev ms
                         n_voxels, voxel_size = self.n_voxels[lvl], self.voxel_size[lvl]
+                    # 生成3D采样点
                     points = get_points(  # [3, vx, vy, vz]  -> 3, 200, 200, 4 (数值 * 坐标)
                         n_voxels=torch.tensor(n_voxels),
                         voxel_size=torch.tensor(voxel_size),
@@ -280,14 +286,25 @@ class FastBEV(BaseDetector):
                     
                     # volumes.append(volume)
                     ########## change 1 ##############
-                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 200, 200))  # 64, 200, 200, 4 -> 4, 64, 200, 200, -> 1, 256, 200, 200
+                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128))
                     ########## change 1 ##############
-                volume_list.append(torch.stack(volumes))  # list([bs, c, vx, vy, vz])  64, 200, 200, 4 * 4 (single point feature * seq)
+                volume_list.append(torch.stack(volumes))  # list([bs, 1, c, H, W])
     
-            mlvl_volumes.append(torch.cat(volume_list, dim=1))  # list([bs, seq*c, vx, vy, vz])
+            mlvl_volumes.append(torch.cat(volume_list, dim=1))  # list([bs, seq, c, vx, vy, vz])
         
+        global dump_id
+        if dump_id is not None:
+            dump_path = f"/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0209_dump/{dump_id}"
+            if not os.path.exists(dump_path):
+                os.makedirs(dump_path)
+            np.save(f"{dump_path}/bev_feat.npy",
+                    mlvl_volumes[0][:,0].detach().cpu().numpy())
+            dump_id += 1
+            if dump_id > 1000:
+                assert False
+            
         if self.style in ['v1', 'v2']:
-            mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, lvl*seq*c, vx, vy, vz]
+            mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, seq, lvl*c, vx, vy, vz]
         else:
             # bev ms: multi-scale bev map (different x/y/z)
             for i in range(len(mlvl_volumes)):
@@ -332,7 +349,7 @@ class FastBEV(BaseDetector):
             # N, C, X, Y, Z = x.shape
             ########## change 1 ##############
             N, Z, C, X, Y = x.shape
-            x = x.reshape(N, Z*C, X, Y)
+            x = x.reshape(N, Z*C, X, Y) # B, frames*C, H, W
             ########## change 1 ##############
 
             def _inner_forward(x):
@@ -430,7 +447,7 @@ class FastBEV(BaseDetector):
 
                     # volumes.append(volume)  # 64, 200, 200, 4 (点云特征)
                     ########## change 1 ##############
-                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 200, 200))  # 64, 200, 200, 4 -> 4, 64, 200, 200, -> 1, 256, 200, 200
+                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128))  # 64, 200, 200, 4 -> 4, 64, 200, 200, -> 1, 256, 200, 200
                     ########## change 1 ##############
                 volume_list.append(torch.stack(volumes))  # list([bs, c, vx, vy, vz])  64, 200, 200, 4 * 4 (single point feaature * seq)
     
@@ -471,7 +488,7 @@ class FastBEV(BaseDetector):
         if torch.onnx.is_in_onnx_export():
             if img[0].shape == (1, 3, 256, 704):
                 return self.onnx_export_2d(img[0], img_metas)  # backbone + neck + neck_fuse
-            elif img[0].shape == (1, 256, 200, 200):
+            elif img[0].shape == (1, 256, 128, 128):
             # elif img.shape == (1, 1024, 200, 200):
                 return self.onnx_export_3d(img, img_metas)  # neck_3d: 2d -> 3d
             else:
@@ -576,15 +593,16 @@ class FastBEV(BaseDetector):
         return x
 
     def onnx_export_3d(self, x, _):
-        # x: [6, 200, 100, 3, 256]
+        # x: [6, 128, 100, 3, 256]
         # if bool(os.getenv("DEPLOY_DEBUG", False)):
         #     x = x.sum(dim=0, keepdim=True)
         #     return [x]
-        x_0, x_1, x_2, x_3 = x  # 1, 256, 200, 200
-        x = torch.cat((x_0, x_1, x_2, x_3), dim=1)  # 1, 1024, 200, 200
+        x_0, x_1, x_2, x_3 = x  # 1, 256, 128, 128
+        # x = x[0]
+        x = torch.cat((x_0, x_1, x_2, x_3), dim=1)  # 1, 1024, 128, 128
 
         if self.style == "v1":
-            # x = x.sum(dim=0, keepdim=True)  # [1, 200, 100, 3, 256]
+            # x = x.sum(dim=0, keepdim=True)  # [1, 128, 100, 3, 256]
             x = self.neck_3d(x)  # [[1, 256, 100, 50], ]
         elif self.style == "v2":
             x = self.neck_3d(x)  # [6, 256, 100, 50]

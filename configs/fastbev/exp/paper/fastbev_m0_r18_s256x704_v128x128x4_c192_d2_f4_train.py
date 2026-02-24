@@ -1,3 +1,7 @@
+import os
+batch_size = eval(os.environ.get("BATCH_SIZE", "6"))
+ckpt = os.environ.get("CKPT", None)
+local_mode = eval(os.environ.get("LOCAL_MODE", 'False'))
 # -*- coding: utf-8 -*-
 model = dict(
     type='FastBEV',
@@ -44,7 +48,7 @@ model = dict(
         alpha=0.5,
         anchor_generator=dict(
             type='AlignedAnchor3DRangeGenerator',
-            ranges=[[-50, -50, -1.8, 50, 50, -1.8]],
+            ranges=[[-51.2, 0, -1.8, 51.2, 102.4, 1.8]],
             # scales=[1, 2, 4],
             sizes=[
                 [0.8660, 2.5981, 1.],  # 1.5/sqrt(3)
@@ -70,8 +74,8 @@ model = dict(
         loss_dir=dict(
             type='CrossEntropyLoss', use_sigmoid=False, loss_weight=0.8)),
     multi_scale_id=[0],
-    n_voxels=[[200, 200, 4]],
-    voxel_size=[[0.5, 0.5, 1.5]],
+    n_voxels=[[128, 128, 4]],
+    voxel_size=[[0.8, 0.8, 1.0]],
     # model training and testing settings
     train_cfg=dict(
         assigner=dict(
@@ -86,7 +90,7 @@ model = dict(
         pos_weight=-1,
         debug=False),
     test_cfg=dict(
-        score_thr=0.05,
+        score_thr=0.1,
         min_bbox_size=0,
         nms_pre=1000,
         max_num=500,
@@ -99,22 +103,22 @@ model = dict(
         # Scale-NMS
         nms_type_list=[
             'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'circle'],
-        nms_thr_list=[0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.5, 0.5, 0.2],
+        nms_thr_list=[0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.5, 0.2],
         nms_radius_thr_list=[4, 12, 10, 10, 12, 0.85, 0.85, 0.175, 0.175, 1],
         nms_rescale_factor=[1.0, 0.7, 0.55, 0.4, 0.7, 1.0, 1.0, 4.5, 9.0, 1.0],
-        test_mode = 'test',
+        test_mode = 'test_pth',
     )
 )
 
 # If point cloud range is changed, the models should also change their point cloud range accordingly
-point_cloud_range = [-50, -50, -5, 50, 50, 3]
+point_cloud_range = [-51.2, 0, -1.8, 51.2, 102.4, 1.8]
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
     'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
 ]
 dataset_type = 'NuScenesMultiView_Map_Dataset2'
-data_root = './data/nuscenes/'
+data_root = './data/nuscenes/' if not local_mode else './data/nuscenes_mini/'
 # Input modality for nuScenes dataset, this is consistent with the submission
 # format which requires the information in input_modality.
 input_modality = dict(
@@ -169,7 +173,7 @@ train_pipeline = [
         type='RandomFlip3D',
         flip_2d=False,
         sync_2d=False,
-        flip_ratio_bev_horizontal=0.5,
+        flip_ratio_bev_horizontal=0.0,
         flip_ratio_bev_vertical=0.5,
         update_img2lidar=True),
     dict(
@@ -191,6 +195,10 @@ test_pipeline = [
         dict(
             type='LoadImageFromFile',
             file_client_args=file_client_args)]),
+    dict(type='LoadAnnotations3D',
+         with_bbox=True,
+         with_label=True,
+         with_bev_seg=True),
     dict(
         type='LoadPointsFromFile',
         dummy=True,
@@ -199,14 +207,15 @@ test_pipeline = [
         use_dim=5),
     dict(type='RandomAugImageMultiViewImage', data_config=data_config, is_train=False),
     # dict(type='TestTimeAugImageMultiViewImage', data_config=data_config, is_train=False),
+    dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-    dict(type='Collect3D', keys=['img'])]
+    dict(type='Collect3D', keys=['img', 'vis_info', 'gt_bboxes_3d', 'gt_labels_3d',])]
 
 data = dict(
-    samples_per_gpu=4,
-    workers_per_gpu=4,
+    samples_per_gpu=batch_size,
+    workers_per_gpu=4 if not local_mode else 0,
     train=dict(
         type='CBGSDataset',
         dataset=dict(
@@ -218,7 +227,7 @@ data = dict(
             test_mode=False,
             with_box2d=True,
             box_type_3d='LiDAR',
-            ann_file='data/nuscenes/nuscenes_infos_train_4d_interval3_max60.pkl',
+            ann_file='data/nuscenes/nuscenes_infos_train_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_train_4d_interval3_max60.pkl',
             load_interval=1,
             sequential=True,
             n_times=4,
@@ -231,6 +240,7 @@ data = dict(
             test_adj='prev',
             test_adj_ids=[1, 3, 5],
             test_time_id=None,
+            local_mode=local_mode
         )
     ),
     val=dict(
@@ -242,7 +252,7 @@ data = dict(
         test_mode=True,
         with_box2d=True,
         box_type_3d='LiDAR',
-        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl',
+        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_val_4d_interval3_max60.pkl',
         load_interval=1,
         sequential=True,
         n_times=4,
@@ -264,7 +274,7 @@ data = dict(
         test_mode=True,
         with_box2d=True,
         box_type_3d='LiDAR',
-        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl',
+        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_val_4d_interval3_max60.pkl',
         load_interval=1,
         sequential=True,
         n_times=4,
@@ -281,7 +291,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW2',
-    lr=0.0001,
+    lr=2e-5,
     # lr=0.0004,
     weight_decay=0.01,
     paramwise_cfg=dict(
@@ -289,13 +299,18 @@ optimizer = dict(
 optimizer_config = dict(grad_clip=dict(max_norm=35., norm_type=2))
 
 # learning policy
+# lr_config = dict(
+#     policy='poly',
+#     warmup='linear',
+#     warmup_iters=1,
+#     warmup_ratio=1e-6,
+#     power=1.0,
+#     min_lr=1e-6,
+#     by_epoch=False
+# )
+
 lr_config = dict(
-    policy='poly',
-    warmup='linear',
-    warmup_iters=1000,
-    warmup_ratio=1e-6,
-    power=1.0,
-    min_lr=0,
+    policy='Fixed',  # 将策略改为固定模式
     by_epoch=False
 )
 
@@ -307,15 +322,15 @@ log_config = dict(
         dict(type='TextLoggerHook'),
         dict(type='TensorboardLoggerHook'),
     ])
-evaluation = dict(interval=5)
+evaluation = dict(interval=30)
 dist_params = dict(backend='nccl')
 find_unused_parameters = True  # todo: fix number of FPN outputs
 log_level = 'INFO'
 
-load_from = 'pretrained_models/cascade_mask_rcnn_r18_fpn_coco-mstrain_3x_20e_nuim_bbox_mAP_0.5110_segm_mAP_0.4070.pth'
+load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0215/epoch_20.pth'
 resume_from = None
 # resume_from = "/workspace/clean_up/fastbev/work_dirs/minjie/change_model_concat_load/epoch_2.pth"
 workflow = [('train', 1)]
 
 # fp16 settings, the loss scale is specifically tuned to avoid Nan
-fp16 = dict(loss_scale='dynamic')
+# fp16 = dict(loss_scale='dynamic')

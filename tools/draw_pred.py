@@ -11,10 +11,6 @@ from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 from os import path as osp
 
-import copy
-# import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-
 mmdet3d_root = os.environ.get('MMDET3D')
 if mmdet3d_root is not None and osp.exists(mmdet3d_root):
     import sys
@@ -27,17 +23,19 @@ from mmdet3d.models import build_model
 from mmdet.apis import  set_random_seed
 from mmdet.datasets import replace_ImageToTensor
 from IPython import embed
+from draw_det_utils import det_post_process
 import ipdb
+from tqdm import tqdm
+import cv2
 
-import onnx, onnxruntime
-from onnxsim import simplify
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
-    parser.add_argument('--config', type=str, required=True, help='test config file path')
-    parser.add_argument('--checkpoint', type=str, required=True, help='checkpoint file')
-    parser.add_argument('--out', type=str, default='./output/result.pkl', help='output result file in pickle format')
+    parser.add_argument('config', help='test config file path')
+    parser.add_argument('checkpoint', help='checkpoint file')
+    parser.add_argument('save_path', help='fig save path')
+    parser.add_argument('--out', help='output result file in pickle format')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -55,9 +53,9 @@ def parse_args():
         nargs='+',
         help='evaluation metrics, which depends on the dataset, e.g., "bbox",'
         ' "segm", "proposal" for COCO, and "mAP", "recall" for PASCAL VOC')
-    parser.add_argument('--show', type=bool, default=False, help='show results')
+    parser.add_argument('--show', action='store_true', help='show results')
     parser.add_argument(
-        '--show-dir', type=str, default='./show_dir', help='directory where results will be saved')
+        '--show-dir', help='directory where results will be saved')
     parser.add_argument(
         '--gpu-collect',
         action='store_true',
@@ -130,11 +128,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    assert args.out or args.eval or args.format_only or args.show \
-        or args.show_dir, \
-        ('Please specify at least one operation (save/eval/format/show the '
-         'results / save the results) with the argument "--out", "--eval"'
-         ', "--format-only", "--show" or "--show-dir"')
 
     if args.eval and args.format_only:
         raise ValueError('--eval and --format_only cannot be both specified')
@@ -214,63 +207,31 @@ def main():
     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
+    model = MMDataParallel(model, device_ids=[0])
     # old versions did not save class info in checkpoints, this walkaround is
     # for backward compatibility
+    
     model.eval()
+    save_path = args.save_path
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    for i, data in tqdm(enumerate(data_loader)):
+        with torch.no_grad():
+            result = model(return_loss=False, rescale=True, **data)
+        front_img = cv2.imread(data['img_metas'].data[0][0]['img_info'][0]['filename'])
+        vis_info = data['vis_info']
+        vis_info['cam_info']['token'] = i
+        vis_info['cam_info']['ego2global_translation'] = [tmp.item() for tmp in vis_info['cam_info']['ego2global_translation']]
+        vis_info['cam_info']['ego2global_rotation'] = [tmp.item() for tmp in vis_info['cam_info']['ego2global_rotation']]
+        
+        # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
+        # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
+        # result[0]['scores_3d'] = torch.ones(gt_len)
+        
+        show_imgs = det_post_process(result[0], front_img, vis_info, None)
+        cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
+    
 
-    with torch.no_grad():
-        for data in data_loader:
-            export_onnx(model, data, export_2d=True, export_3d=True)
-            break
-
-def export_onnx(model, data, export_2d=False, export_3d=False):
-    model = copy.deepcopy(model).cuda()
-    model.eval()
-    # Prepare dummy inputs (modify according to your model's input format)
-    # img_metas = val_dataset['img_metas']
-    # img = val_dataset['img']
-
-    # 导出2D模型    # backbone + neck + neck_fuse
-    if export_2d:
-        img = [torch.randn((1, 3, 256, 704)).cuda()]
-        onnx_path_2d = f'./export_2d_model.onnx'
-        # 导出ONNX模型
-        torch.onnx.export(
-            model,
-            (img, None),
-            onnx_path_2d,
-            verbose=True,
-            opset_version=13,
-            input_names=['img'],
-            output_names=['feat_2d']
-        )
-        onnx_model_2d = onnx.load(onnx_path_2d)
-        onnx.checker.check_model(onnx_model_2d)
-        simplified_model_2d, check_ok = simplify(onnx_model_2d)
-        onnx.save_model(simplified_model_2d, f'./work_dirs/onnx/simplified_export_2d_model.onnx')
-
-    # 导出3D模型
-    if export_3d:
-        dummy_data = torch.randn((1, 256, 128, 128)).cuda()
-        bev_feat = [dummy_data, dummy_data, dummy_data, dummy_data]
-        # img = [dummy_data]
-        onnx_path_3d = f'./work_dirs/onnx/export_3d_model.onnx'
-        # 导出ONNX模型
-        torch.onnx.export(
-            model,
-            (bev_feat, None),
-            onnx_path_3d,
-            verbose=True,
-            opset_version=13,
-            input_names=['bev_feat0', 'bev_feat1', 'bev_feat2', 'bev_feat3'],
-            output_names=['cls_score', 'bbox_pred', 'dir_cls_preds']
-        )
-        onnx_model_3d = onnx.load(onnx_path_3d)
-
-        # 检查ONNX模型
-        onnx.checker.check_model(onnx_model_3d)
-        simplified_model_3d, check_ok = simplify(onnx_model_3d)
-        onnx.save_model(simplified_model_3d, f'./work_dirs/onnx/simplified_export_3d_model.onnx')
 
 if __name__ == '__main__':
     main()

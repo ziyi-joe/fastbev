@@ -263,6 +263,11 @@ class FreeAnchor3DHead(Anchor3DHead):
             torch.Tensor: Loss of positive samples.
         """
         matched_prob = matched_cls_prob * matched_box_prob
+        if torch.isnan(matched_prob).any():
+            print(f"positive matched_prob is nan")
+        if torch.isnan(matched_box_prob).any():
+            print(f"positive matched_box_prob is nan")
+            
         weight = 1 / torch.clamp(1 - matched_prob, 1e-12, None)
         weight /= weight.sum(dim=1).unsqueeze(dim=-1)
         bag_prob = (weight * matched_prob).sum(dim=1)
@@ -283,6 +288,11 @@ class FreeAnchor3DHead(Anchor3DHead):
         Returns:
             torch.Tensor: Loss of negative samples.
         """
+        if torch.isnan(cls_prob).any():
+            print(f"neg cls_prob is nan")
+        if torch.isnan(box_prob).any():
+            print(f"neg box_prob is nan")
+            return cls_prob.sum() * 0.0
         prob = cls_prob * (1 - box_prob)
         prob = prob.clamp(0, 1)  # to avoid bug of BCE, check
 

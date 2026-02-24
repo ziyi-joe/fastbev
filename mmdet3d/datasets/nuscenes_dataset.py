@@ -239,12 +239,26 @@ class NuScenesDataset(Custom3DDataset):
                 - ann_info (dict): Annotation info.
         """
         info = self.data_infos[index]
+        vis_info = dict(
+            lidar2ego_rotation=info['lidar2ego_rotation'],
+            lidar2ego_translation=info['lidar2ego_translation'],
+            ego2global_rotation=info['ego2global_rotation'],
+            ego2global_translation=info['ego2global_translation'],
+            sensor2lidar_rotation=info['cams']['CAM_FRONT']['sensor2lidar_rotation'],
+            sensor2lidar_translation=info['cams']['CAM_FRONT']['sensor2lidar_translation'],
+            cam_intrinsic=info['cams']['CAM_FRONT']['cam_intrinsic'],
+            cam_info=dict(
+                ego2global_translation=info['cams']['CAM_FRONT']['ego2global_translation'],
+                ego2global_rotation=info['cams']['CAM_FRONT']['ego2global_rotation']
+            )
+        )
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
             pts_filename=info['lidar_path'],
             sweeps=info['sweeps'],
             timestamp=info['timestamp'] / 1e6,
+            vis_info=vis_info,
         )
         if self.modality['use_camera']:
             image_paths = []
@@ -424,7 +438,7 @@ class NuScenesDataset(Custom3DDataset):
             if self.sequential:
                 input_dict.update(dict(info=info))
 
-        if not self.test_mode:
+        if True:
             annos = self.get_ann_info(index)
             input_dict['ann_info'] = annos
             if self.sequential:
