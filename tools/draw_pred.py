@@ -27,6 +27,7 @@ from draw_det_utils import det_post_process
 import ipdb
 from tqdm import tqdm
 import cv2
+import numpy as np
 
 
 def parse_args():
@@ -215,20 +216,43 @@ def main():
     save_path = args.save_path
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+    lidar2ego = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/lidar2ego.npy")
     for i, data in tqdm(enumerate(data_loader)):
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
         front_img = cv2.imread(data['img_metas'].data[0][0]['img_info'][0]['filename'])
         vis_info = data['vis_info']
-        vis_info['cam_info']['token'] = i
-        vis_info['cam_info']['ego2global_translation'] = [tmp.item() for tmp in vis_info['cam_info']['ego2global_translation']]
-        vis_info['cam_info']['ego2global_rotation'] = [tmp.item() for tmp in vis_info['cam_info']['ego2global_rotation']]
+        final_output_list = []
+        cam_output = {}
+        for bbox in result[0]['boxes_3d'].tensor:
+            final_output_list.append(dict(
+                Obstacle_Rel_Vel_X=bbox[7],
+                Obstacle_Rel_Vel_Y=bbox[8],
+                Obstacle_TTC = 99.0
+            ))
+        keys = ['Obstacle_Rel_Vel_X', 'Obstacle_Rel_Vel_Y', 'Obstacle_TTC']
+        for k in keys:
+            cam_output[k] = [item[k] for item in final_output_list]
         
+        # 可视化gt
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)
+        # final_output_list = []
+        # cam_output = {}
+        # for bbox in data['gt_bboxes_3d'].data[0][0].tensor:
+        #     final_output_list.append(dict(
+        #         Obstacle_Rel_Vel_X=bbox[7],
+        #         Obstacle_Rel_Vel_Y=bbox[8],
+        #         Obstacle_TTC = 99.0
+        #     ))
+        # keys = ['Obstacle_Rel_Vel_X', 'Obstacle_Rel_Vel_Y', 'Obstacle_TTC']
+        # for k in keys:
+        #     cam_output[k] = [item[k] for item in final_output_list]
         
-        show_imgs = det_post_process(result[0], front_img, vis_info, None)
+        lidar2cam = data['ego2cam'][0][0] @ lidar2ego
+        intrinsic0 = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
+        show_imgs = det_post_process(result[0], front_img, lidar2cam.cpu().numpy(), intrinsic0, vis_info, 0.0, cam_output)
         cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
     
 

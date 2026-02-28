@@ -22,6 +22,8 @@ class MultiViewPipeline:
     def __call__(self, results):
         imgs = []
         extrinsics = []
+        lidar2img_aug = []
+        ego2cam = []
         if not self.sequential:
             assert len(results['img_info']) == 6
             # ids = np.arange(len(results['img_info']))
@@ -50,6 +52,8 @@ class MultiViewPipeline:
             _results = self.transforms(_results)
             imgs.append(_results['img'])
             extrinsics.append(results['lidar2img']['extrinsic'][i])
+            lidar2img_aug.append(results['lidar2img']['lidar2img_aug'][i])
+            ego2cam.append(results['ego2cam'][i])
         for key in _results.keys():
             if key not in ['img', 'img_prefix', 'img_info']:
                 results[key] = _results[key]
@@ -62,7 +66,10 @@ class MultiViewPipeline:
             results['gt_bboxes'] = gt_bboxes
             results['gt_labels'] = gt_labels
             results['gt_bboxes_ignore'] = gt_bboxes_ignore
-
+        # results['ego2cam'] = [results['ego2cam'][i] for i in selected_cam_indices]
+        results['ego2cam'] = ego2cam
+        results['intrinsic'] = [results['intrinsic'][i] for i in selected_cam_indices]
+        results['lidar2img']['lidar2img_aug'] = lidar2img_aug
         results['lidar2img']['extrinsic'] = extrinsics
         return results
 

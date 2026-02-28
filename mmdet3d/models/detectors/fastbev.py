@@ -23,6 +23,47 @@ import shutil
 # import bstnnx
 
 dump_id = None
+
+class SegHead(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        classes
+    ) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.classes = classes
+        embed_dim = 16
+
+        self.classifier = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels, len(classes) + 1, 1)
+        )
+        self.embed = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels*2, 3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels*2),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels*2, in_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels, embed_dim, 1)
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ):
+        if isinstance(x, (list, tuple)):
+            x = x[0]
+        out = self.classifier(x)
+        x_emb = self.embed(x)
+        return out, x_emb
+
 @DETECTORS.register_module()
 class FastBEV(BaseDetector):
     def __init__(
@@ -91,6 +132,9 @@ class FastBEV(BaseDetector):
             self.bbox_head_2d = build_head(bbox_head_2d)
         else:
             self.bbox_head_2d = None
+            
+        classes = ['lane_divider', 'road_divider', 'ped_crossing']
+        self.seghead = SegHead(in_channels=256*4, classes=classes)
 
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -150,12 +194,6 @@ class FastBEV(BaseDetector):
         return torch.stack(projection)
 
     def extract_feat(self, img, img_metas, mode):
-        
-        if self.test_cfg.get("save_calibrate_data_flag", False):
-            for path in img_metas[0]['img_info']:
-                shutil.copy(path['filename'], self.test_cfg["backbone_data_path"])
-
-        ###################### 前处理 ######################
         batch_size = img.shape[0]
         img = img.reshape(
             [-1] + list(img.shape)[2:]
@@ -202,7 +240,8 @@ class FastBEV(BaseDetector):
                             resized_feat = resize(
                                 mlvl_feats[i], 
                                 size=mlvl_feats[msid].size()[2:], 
-                                mode="nearest",)
+                                mode="bilinear",
+                                align_corners=False)
                             fuse_feats.append(resized_feat)
                     
                         if len(fuse_feats) > 1:
@@ -226,20 +265,13 @@ class FastBEV(BaseDetector):
         else:
             raise ValueError(f"Unsupported test mode: {mode}")
         ###################### backbone resnet + fpn ######################
-        
-        ###################### 2d -> 3d ######################
-        # v3 bev ms(No)
-        if isinstance(self.n_voxels, list) and len(mlvl_feats) < len(self.n_voxels):
-            pad_feats = len(self.n_voxels) - len(mlvl_feats)
-            for _ in range(pad_feats):
-                mlvl_feats.append(mlvl_feats[0])
 
-        # 从图像空间投影到
+        # 2d feat -> bev feat
         mlvl_volumes = []
         for lvl, mlvl_feat in enumerate(mlvl_feats):
             stride_i = math.ceil(img.shape[-1] / mlvl_feat.shape[-1])  # P4 880 / 32 = 27.5
             # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
-            mlvl_feat = mlvl_feat.reshape([batch_size, -1] + list(mlvl_feat.shape[1:]))  # 1,24,64,64,176
+            mlvl_feat = mlvl_feat.reshape([batch_size, -1] + list(mlvl_feat.shape[1:]))  # [bz,seq*2,64,64,176]
             # 按帧分开，[bs, seq*nv, c, h, w] -> list([bs, nv, c, h, w])
             mlvl_feat_split = torch.split(mlvl_feat, 2, dim=1)
 
@@ -283,14 +315,16 @@ class FastBEV(BaseDetector):
                         volume = volume / valid
                         valid = valid > 0
                         volume[:, ~valid[0]] = 0.0
-                    
-                    # volumes.append(volume)
-                    ########## change 1 ##############
+
+                    # volumes.append(volume) # [C, X, Y, Z]
+                    # ########## change 1 ##############
+                    # 避免后续在neck3d中reshape
+                    # [C,X,Y,Z] -> [Z,C,X,Y] -> [1, Z*C, X, Y]
                     volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128))
-                    ########## change 1 ##############
-                volume_list.append(torch.stack(volumes))  # list([bs, 1, c, H, W])
+                    # ########## change 1 ##############
+                volume_list.append(torch.stack(volumes))  # list([bs, 1, Z*C, H, W])
     
-            mlvl_volumes.append(torch.cat(volume_list, dim=1))  # list([bs, seq, c, vx, vy, vz])
+            mlvl_volumes.append(torch.cat(volume_list, dim=1))  # list([bs, seq, Z*C, vx, vy])
         
         global dump_id
         if dump_id is not None:
@@ -304,7 +338,7 @@ class FastBEV(BaseDetector):
                 assert False
             
         if self.style in ['v1', 'v2']:
-            mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, seq, lvl*c, vx, vy, vz]
+            mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, lvl*seq*c, vx, vy, vz]
         else:
             # bev ms: multi-scale bev map (different x/y/z)
             for i in range(len(mlvl_volumes)):
@@ -332,146 +366,22 @@ class FastBEV(BaseDetector):
                 mlvl_volume = mlvl_volume.unsqueeze(-1)
                 mlvl_volumes[i] = mlvl_volume
             mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, z1*c1+z2*c2+..., vx, vy, 1]
-        ###################### 2d -> 3d ######################
-        
-        ###################### 3d neck ######################
-        if mode in ['test', 'train', 'test_pth']:
-            if self.test_cfg.get("save_calibrate_data_flag", False):
-                for i in range(len(mlvl_volumes[0])):
-                    os.makedirs(self.test_cfg["head_data_path"] + f"/{i}", exist_ok=True)
-                    np.save(self.test_cfg["head_data_path"] + \
-                            f'/{i}/{self.test_cfg["calibrate_data_id"]}_{i}.npy', \
-                                mlvl_volumes[0][i].unsqueeze(0).cpu().float().numpy())
 
-            x = mlvl_volumes
-
-            # N, C*T, X, Y, Z -> N, X, Y, Z, C -> N, X, Y, Z*C*T -> N, Z*C*T, X, Y
-            # N, C, X, Y, Z = x.shape
-            ########## change 1 ##############
-            N, Z, C, X, Y = x.shape
-            x = x.reshape(N, Z*C, X, Y) # B, frames*C, H, W
-            ########## change 1 ##############
-
-            def _inner_forward(x):
-                # v1/v2: [bs, lvl*seq*c, vx, vy, vz] -> [bs, c', vx, vy]
-                # v3/v4: [bs, z1*c1+z2*c2+..., vx, vy, 1] -> [bs, c', vx, vy]
-                out = self.neck_3d(x)
-                return out
-                
-            if self.with_cp and x.requires_grad:
-                x = cp.checkpoint(_inner_forward, x)
-            else:
-                x = _inner_forward(x)
-
-        elif mode == 'test_onnx':
-            x_0 = mlvl_volumes[0][0].unsqueeze(0).cpu().float().numpy()
-            x_1 = mlvl_volumes[0][1].unsqueeze(0).cpu().float().numpy()
-            x_2 = mlvl_volumes[0][2].unsqueeze(0).cpu().float().numpy()
-            x_3 = mlvl_volumes[0][3].unsqueeze(0).cpu().float().numpy()
-
-            onnx_outputs = self.onnx_infer(self.head_session, [x_0, x_1, x_2, x_3])
-
-            out1 = torch.from_numpy(onnx_outputs[0]).to(img[0].device)
-            out2 = torch.from_numpy(onnx_outputs[1]).to(img[0].device)
-            out3 = torch.from_numpy(onnx_outputs[2]).to(img[0].device)
-            x = ([out1], [out2], [out3])
-            features_2d = None
+        x = mlvl_volumes
+        B, seq, C, X, Y = x.shape
+        # [bs, seq, Z*C, X, Y] -> [bs, seq*Z*C, X, Y]
+        x = x.reshape(B, seq*C, X, Y)
+        def _inner_forward(x):
+            # v1/v2: [bs, lvl*seq*c, vx, vy, vz] -> [bs, c', vx, vy]
+            # v3/v4: [bs, z1*c1+z2*c2+..., vx, vy, 1] -> [bs, c', vx, vy]
+            out = self.neck_3d(x)
+            return out
+            
+        if self.with_cp and x.requires_grad:
+            x = cp.checkpoint(_inner_forward, x)
         else:
-            raise ValueError(f"Unsupported test mode: {mode}")
-        ###################### 3d neck ######################
-            
-        return x, None, features_2d
+            x = _inner_forward(x)
 
-    def extract_feat_custom(self, img, img_metas, mode):
-        ############################################ 前处理 ############################################
-        batch_size = img.shape[0]
-        img = img.reshape([-1] + list(img.shape)[2:])  # [1, 6, 3, 928, 1600] -> [6, 3, 928, 1600]
-        ############################################ 前处理 ############################################
-
-        ############################################ backbone resnet + fpn ############################################
-        all_outputs = []
-        for i in range(img.size(0)):
-            input_data_single = img[i].unsqueeze(0).cpu().float().numpy()  # 1,3,256,704
-            onnx_output = self.onnx_infer(self.backbone_session, [input_data_single])
-            output_data_single = torch.from_numpy(onnx_output[0]).to(img[0].device)
-            all_outputs.append(output_data_single)
-        mlvl_feats = [torch.cat(all_outputs, dim=0)]
-        ############################################ backbone resnet + fpn ############################################
-        
-        ############################################ 2d -> 3d ############################################
-        # v3 bev ms
-        if isinstance(self.n_voxels, list) and len(mlvl_feats) < len(self.n_voxels):
-            pad_feats = len(self.n_voxels) - len(mlvl_feats)
-            for _ in range(pad_feats):
-                mlvl_feats.append(mlvl_feats[0])
-
-        mlvl_volumes = []
-        for lvl, mlvl_feat in enumerate(mlvl_feats):  # 24,64,64,176
-            stride_i = math.ceil(img.shape[-1] / mlvl_feat.shape[-1])  # P4 880 / 32 = 27.5
-            # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
-            mlvl_feat = mlvl_feat.reshape([batch_size, -1] + list(mlvl_feat.shape[1:]))  # 1,24,64,64,176
-            # [bs, seq*nv, c, h, w] -> list([bs, nv, c, h, w])
-            mlvl_feat_split = torch.split(mlvl_feat, 6, dim=1)  # 1, 6, 64, 64, 176 * 4(seq)
-
-            volume_list = []
-            for seq_id in range(len(mlvl_feat_split)):
-                volumes = []
-                for batch_id, seq_img_meta in enumerate(img_metas):
-                    feat_i = mlvl_feat_split[seq_id][batch_id]  # [nv, c, h, w]
-                    img_meta = copy.deepcopy(seq_img_meta)
-                    img_meta["lidar2img"]["extrinsic"] = img_meta["lidar2img"]["extrinsic"][seq_id*6:(seq_id+1)*6]
-                    if isinstance(img_meta["img_shape"], list):
-                        img_meta["img_shape"] = img_meta["img_shape"][seq_id*6:(seq_id+1)*6]
-                        img_meta["img_shape"] = img_meta["img_shape"][0]
-                    height = math.ceil(img_meta["img_shape"][0] / stride_i)
-                    width = math.ceil(img_meta["img_shape"][1] / stride_i)
-
-                    projection = self._compute_projection(
-                        img_meta, stride_i, noise=self.extrinsic_noise).to(feat_i.device)
-                    
-                    # wo/ bev ms
-                    n_voxels, voxel_size = self.n_voxels[0], self.voxel_size[0]
-
-                    points = get_points(  # [3, vx, vy, vz]  -> 3, 200, 200, 4 (数值 * 坐标)
-                        n_voxels=torch.tensor(n_voxels),
-                        voxel_size=torch.tensor(voxel_size),
-                        origin=torch.tensor(img_meta["lidar2img"]["origin"]),
-                    ).to(feat_i.device)
-                    
-                    # ######################################## fix index!!! ########################################
-                    # projection = torch.tensor(np.load("/workspace/fastbev/debug_gather/projection.npy")).cuda()  # fix index
-                    # points = torch.tensor(np.load("/workspace/fastbev/debug_gather/points.npy")).cuda()
-                    # ######################################## fix index!!! ########################################
-
-                    volume = backproject_inplace(feat_i[:, :, :height, :width], points, projection)  # [c, vx, vy, vz]
-
-                    # volumes.append(volume)  # 64, 200, 200, 4 (点云特征)
-                    ########## change 1 ##############
-                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128))  # 64, 200, 200, 4 -> 4, 64, 200, 200, -> 1, 256, 200, 200
-                    ########## change 1 ##############
-                volume_list.append(torch.stack(volumes))  # list([bs, c, vx, vy, vz])  64, 200, 200, 4 * 4 (single point feaature * seq)
-    
-            mlvl_volumes.append(torch.cat(volume_list, dim=1))  # list([bs, seq*c, vx, vy, vz])
-        
-        mlvl_volumes = torch.cat(mlvl_volumes, dim=1)  # [bs, lvl*seq*c, vx, vy, vz]
-        ############################################ 2d -> 3d ############################################
-        
-
-        ############################################ 3d neck ############################################
-        x_0 = mlvl_volumes[0][0].unsqueeze(0).cpu().float().numpy()
-        x_1 = mlvl_volumes[0][1].unsqueeze(0).cpu().float().numpy()
-        x_2 = mlvl_volumes[0][2].unsqueeze(0).cpu().float().numpy()
-        x_3 = mlvl_volumes[0][3].unsqueeze(0).cpu().float().numpy()
-        
-        onnx_outputs = self.onnx_infer(self.head_session, [x_0, x_1, x_2, x_3])
-
-        out1 = torch.from_numpy(onnx_outputs[0]).to(img[0].device)
-        out2 = torch.from_numpy(onnx_outputs[1]).to(img[0].device)
-        out3 = torch.from_numpy(onnx_outputs[2]).to(img[0].device)
-        x = ([out1], [out2], [out3])
-        features_2d = None
-        ############################################ 3d neck ############################################
-            
         return x, None, features_2d
 
     @auto_fp16(apply_to=('img', ))
@@ -575,13 +485,13 @@ class FastBEV(BaseDetector):
         x = self.backbone(img)
         c1, c2, c3, c4 = self.neck(x)
         c2 = resize(
-            c2, size=c1.size()[2:], mode="nearest"
+            c2, size=c1.size()[2:], mode="bilinear", align_corners=False
         )  # [6, 64, 232, 400]
         c3 = resize(
-            c3, size=c1.size()[2:], mode="nearest"
+            c3, size=c1.size()[2:], mode="bilinear", align_corners=False
         )  # [6, 64, 232, 400]
         c4 = resize(
-            c4, size=c1.size()[2:], mode="nearest"
+            c4, size=c1.size()[2:], mode="bilinear", align_corners=False
         )  # [6, 64, 232, 400]
         x = torch.cat([c1, c2, c3, c4], dim=1)
         x = self.neck_fuse_0(x)
@@ -600,6 +510,9 @@ class FastBEV(BaseDetector):
         x_0, x_1, x_2, x_3 = x  # 1, 256, 128, 128
         # x = x[0]
         x = torch.cat((x_0, x_1, x_2, x_3), dim=1)  # 1, 1024, 128, 128
+        
+        # 车道线检测
+        pred_bev_map, instance_map = self.seghead(x)
 
         if self.style == "v1":
             # x = x.sum(dim=0, keepdim=True)  # [1, 128, 100, 3, 256]
@@ -615,11 +528,11 @@ class FastBEV(BaseDetector):
         if self.bbox_head is not None:
             cls_score, bbox_pred, dir_cls_preds = self.bbox_head(x)
             # cls_score = [item.sigmoid() for item in cls_score]
-
+            
         if dir_cls_preds is None:
             x = [cls_score, bbox_pred]
         else:
-            x = [cls_score, bbox_pred, dir_cls_preds]
+            x = [cls_score, bbox_pred, dir_cls_preds, pred_bev_map, instance_map]
         # if os.getenv("DEPLOY", False):
         #     if dir_cls_preds is None:
         #         x = [cls_score, bbox_pred]
@@ -631,26 +544,13 @@ class FastBEV(BaseDetector):
 
     def simple_test(self, img, img_metas, mode):
         bbox_results = []
-        if mode in ['test_pth', 'test_onnx']:
-            feature_bev, _, features_2d = self.extract_feat(img, img_metas, mode)
-        elif mode == 'test_custom':
-            feature_bev, _, features_2d = self.extract_feat_custom(img, img_metas, mode)
+        feature_bev, _, features_2d = self.extract_feat(img, img_metas, mode)
 
         if self.bbox_head is not None:
             if self.test_cfg.get('test_mode', False) == 'test_pth':
                 x = self.bbox_head(feature_bev)
             elif self.test_cfg.get('test_mode', False) == 'test_onnx':
                 x = feature_bev
-
-            if self.test_cfg.get('test_mode', False) == 'test_custom':
-                x = feature_bev
-                bbox_list = get_bboxes(*x)
-                # bbox_list_2 = self.bbox_head.get_bboxes(*x, img_metas, valid=None)
-                bbox_results = [
-                    bbox3d2result(det_bboxes, det_scores, det_labels)
-                    for det_bboxes, det_scores, det_labels in bbox_list
-                ]
-                return bbox_results
             
             bbox_list = self.bbox_head.get_bboxes(*x, img_metas, valid=None)
             bbox_results = [

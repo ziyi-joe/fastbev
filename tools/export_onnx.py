@@ -233,7 +233,7 @@ def export_onnx(model, data, export_2d=False, export_3d=False):
     # 导出2D模型    # backbone + neck + neck_fuse
     if export_2d:
         img = [torch.randn((1, 3, 256, 704)).cuda()]
-        onnx_path_2d = f'./export_2d_model.onnx'
+        onnx_path_2d = f'./work_dirs/onnx/export_2d_model.onnx'
         # 导出ONNX模型
         torch.onnx.export(
             model,
@@ -263,7 +263,7 @@ def export_onnx(model, data, export_2d=False, export_3d=False):
             verbose=True,
             opset_version=13,
             input_names=['bev_feat0', 'bev_feat1', 'bev_feat2', 'bev_feat3'],
-            output_names=['cls_score', 'bbox_pred', 'dir_cls_preds']
+            output_names=['cls_score', 'bbox_pred', 'dir_cls_preds', 'pred_bev_map', 'instance_map']
         )
         onnx_model_3d = onnx.load(onnx_path_3d)
 

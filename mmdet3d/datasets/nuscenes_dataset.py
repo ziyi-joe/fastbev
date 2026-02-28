@@ -258,13 +258,16 @@ class NuScenesDataset(Custom3DDataset):
             pts_filename=info['lidar_path'],
             sweeps=info['sweeps'],
             timestamp=info['timestamp'] / 1e6,
+            ego_vel=info['velo'],
             vis_info=vis_info,
         )
         if self.modality['use_camera']:
             image_paths = []
             lidar2img_rts = []
+            ego2cam_rts = []
             lidar2img_augs = []
             lidar2img_extras = []
+            intrinsics = []
             kws = [
                 'sensor2ego_translation',
                 'sensor2ego_rotation',
@@ -299,13 +302,19 @@ class NuScenesDataset(Custom3DDataset):
                     'post_rot': np.eye(3),
                     'post_tran': np.zeros(3),
                 }
+                lidar2ego = np.eye(4, dtype=np.float32)
+                lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+                lidar2ego[:3, 3] = info['lidar2ego_translation']
                 lidar2img_augs.append(lidar2img_aug)
 
                 viewpad = np.eye(4)
                 viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
 
                 lidar2img_rt = (viewpad @ lidar2cam_rt.T)
+                ego2cam_rt = lidar2cam_rt.T @ np.linalg.inv(lidar2ego)
                 lidar2img_rts.append(lidar2img_rt)
+                ego2cam_rts.append(ego2cam_rt)
+                intrinsics.append(intrinsic)
 
             if self.sequential:
                 adjacent_type_list = []
@@ -412,6 +421,8 @@ class NuScenesDataset(Custom3DDataset):
                         viewpad[:intrin.shape[0], :intrin.shape[1]] = intrin
                         lidar2img_rt = (viewpad @ lidar2cam_rt.T)
                         lidar2img_rts.append(lidar2img_rt)
+                        ego2cam_rt = lidar2cam_rt.T @ np.linalg.inv(lidar2ego)
+                        ego2cam_rts.append(ego2cam_rt)
 
                         # keep original rts
                         lidar2img_extra = {kw: info_adj[kw] for kw in kws_adj}
@@ -432,7 +443,10 @@ class NuScenesDataset(Custom3DDataset):
                     img_filename=image_paths,
                     lidar2img=lidar2img_rts,
                     lidar2img_aug=lidar2img_augs,
-                    lidar2img_extra=lidar2img_extras
+                    lidar2img_extra=lidar2img_extras,
+                    intrinsic=intrinsics,
+                    ego2cam=ego2cam_rts,
+                    lidar2ego=lidar2ego
                 )
             )
             if self.sequential:

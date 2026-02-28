@@ -53,24 +53,24 @@ def parse_args():
 
     return args
 
-def lidar2img(points_lidar, camrera_info):
-    points_lidar_homogeneous = \
-        np.concatenate([points_lidar,
-                        np.ones((points_lidar.shape[0], 1),
-                                dtype=points_lidar.dtype)], axis=1)
-    camera2lidar = np.eye(4, dtype=np.float32)
-    camera2lidar[:3, :3] = camrera_info['sensor2lidar_rotation']
-    camera2lidar[:3, 3] = camrera_info['sensor2lidar_translation']
-    lidar2camera = np.linalg.inv(camera2lidar)
-    points_camera_homogeneous = points_lidar_homogeneous @ lidar2camera.T
-    points_camera = points_camera_homogeneous[:, :3]
-    valid = np.ones((points_camera.shape[0]), dtype=bool)
-    valid = np.logical_and(points_camera[:, -1] > 0.5, valid)
-    points_camera = points_camera / points_camera[:, 2:3]
-    camera2img = camrera_info['cam_intrinsic'][0].numpy()
-    points_img = points_camera @ camera2img.T
-    points_img = points_img[:, :2]
-    return points_img, valid
+# def lidar2img(points_lidar, a, b, camrera_info):
+#     points_lidar_homogeneous = \
+#         np.concatenate([points_lidar,
+#                         np.ones((points_lidar.shape[0], 1),
+#                                 dtype=points_lidar.dtype)], axis=1)
+#     camera2lidar = np.eye(4, dtype=np.float32)
+#     camera2lidar[:3, :3] = camrera_info['sensor2lidar_rotation']
+#     camera2lidar[:3, 3] = camrera_info['sensor2lidar_translation']
+#     lidar2camera = np.linalg.inv(camera2lidar)
+#     points_camera_homogeneous = points_lidar_homogeneous @ lidar2camera.T
+#     points_camera = points_camera_homogeneous[:, :3]
+#     valid = np.ones((points_camera.shape[0]), dtype=bool)
+#     valid = np.logical_and(points_camera[:, -1] > 0.5, valid)
+#     points_camera = points_camera / points_camera[:, 2:3]
+#     camera2img = camrera_info['cam_intrinsic'][0].numpy()
+#     points_img = points_camera @ camera2img.T
+#     points_img = points_img[:, :2]
+#     return points_img, valid
 
 
 def ego2img(points_ego, info):
@@ -98,27 +98,17 @@ def ego2img(points_ego, info):
     return points_img, valid
 
 
-def lidar2img(points_lidar, info):
+def lidar2img(points_lidar, lidar2camera, intrinsic, info):
     points_lidar_homogeneous = \
         np.concatenate([points_lidar,
                         np.ones((points_lidar.shape[0], 1),
                                 dtype=points_lidar.dtype)], axis=1)
-    camera2lidar = np.eye(4, dtype=np.float32)
-    camera2lidar[:3, :3] = info['sensor2lidar_rotation'].numpy()[0]
-    camera2lidar[:3, 3] = info['sensor2lidar_translation'].numpy()[0]
-    lidar2camera = np.linalg.inv(camera2lidar)
-    lidar2ego = np.eye(4, dtype=np.float32)
-    lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
-    lidar2ego[:3, 3] = info['lidar2ego_translation']
-    ego2lidar = np.linalg.inv(lidar2ego)
-    ego2camera = lidar2camera @ ego2lidar
-    points_camera_homogeneous = (lidar2camera @ points_lidar_homogeneous.T).T
+    points_camera_homogeneous = points_lidar_homogeneous @ lidar2camera.T
     points_camera = points_camera_homogeneous[:, :3]
     valid = np.ones((points_camera.shape[0]), dtype=bool)
     valid = np.logical_and(points_camera[:, -1] > 0.5, valid)
     points_camera = points_camera / points_camera[:, 2:3]
-    camera2img = info['cam_intrinsic'][0].numpy()
-    points_img = points_camera @ camera2img.T
+    points_img = points_camera @ intrinsic.T
     points_img = points_img[:, :2]
     return points_img, valid
 
@@ -152,7 +142,7 @@ def write_text(img, text, pos):
     img = cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
     return img
 
-def det_post_process(pts_bbox, img, infos, ego_cur_vel=0.0, cam_output=None):
+def det_post_process(pts_bbox, img, lidar2camera, intrinsic, info, ego_cur_vel=0.0, cam_output=None):
     from mmdet3d.core import bbox3d2result
     from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes as LB
     import numpy as np
@@ -169,7 +159,7 @@ def det_post_process(pts_bbox, img, infos, ego_cur_vel=0.0, cam_output=None):
     views = ['CAM_FRONT']
     for view in views:
         # corners_img, valid = lidar2img(corners_lidar, infos)
-        corners_img, valid = lidar2img(corners_ego, infos)
+        corners_img, valid = lidar2img(corners_ego, lidar2camera, intrinsic, info)
         valid = np.logical_and(
             valid,
             check_point_in_img(corners_img, img.shape[0], img.shape[1]))
@@ -178,11 +168,11 @@ def det_post_process(pts_bbox, img, infos, ego_cur_vel=0.0, cam_output=None):
         corners_img = corners_img.reshape(-1, 8, 2).astype(np.int)
         cam_idx = 0
         for aid in range(valid.shape[0]):
-            if pts_bbox['scores_3d'][aid] < 0.4:
-                continue
+            # if pts_bbox['scores_3d'][aid] < 0.4:
+            #     continue
             is_dangerous = False
             if cam_output is not None:
-                vx = cam_output['Obstacle_Rel_Vel_X'][cam_idx] + ego_cur_vel
+                vx = cam_output['Obstacle_Rel_Vel_X'][cam_idx]
                 vy = cam_output['Obstacle_Rel_Vel_Y'][cam_idx]
                 vel = np.sqrt(vx**2 + vy**2)
                 pos = ((corners_img[aid][0] + corners_img[aid][1]) / 2.0).astype(np.int64)

@@ -40,7 +40,12 @@ class NuScenesMultiViewDataset(MultiViewMixin, NuScenesDataset):
                 lidar2img_aug=data_info['lidar2img_aug'],
                 lidar2img_extra=data_info['lidar2img_extra']
             ),
-            vis_info=data_info['vis_info']
+            ego2cam=data_info['ego2cam'],
+            intrinsic=data_info['intrinsic'],
+            lidar2ego=data_info['lidar2ego'],
+            vis_info=data_info['vis_info'],
+            timestamp=data_info['timestamp'],
+            ego_vel=data_info['ego_vel']
         )
         if 'ann_info' in data_info:
             gt_bboxes_3d = data_info['ann_info']['gt_bboxes_3d']

@@ -48,7 +48,7 @@ model = dict(
         alpha=0.5,
         anchor_generator=dict(
             type='AlignedAnchor3DRangeGenerator',
-            ranges=[[-51.2, 0, -1.8, 51.2, 102.4, 1.8]],
+            ranges=[[-25.6, 0, -1.8, 25.6, 64, -1.8]],
             # scales=[1, 2, 4],
             sizes=[
                 [0.8660, 2.5981, 1.],  # 1.5/sqrt(3)
@@ -75,7 +75,7 @@ model = dict(
             type='CrossEntropyLoss', use_sigmoid=False, loss_weight=0.8)),
     multi_scale_id=[0],
     n_voxels=[[128, 128, 4]],
-    voxel_size=[[0.8, 0.8, 1.0]],
+    voxel_size=[[0.4, 0.5, 1.5]],
     # model training and testing settings
     train_cfg=dict(
         assigner=dict(
@@ -111,7 +111,7 @@ model = dict(
 )
 
 # If point cloud range is changed, the models should also change their point cloud range accordingly
-point_cloud_range = [-51.2, 0, -1.8, 51.2, 102.4, 1.8]
+point_cloud_range = [-25.6, 0, -5, 25.6, 64.0, 3]
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
@@ -211,7 +211,8 @@ test_pipeline = [
     dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-    dict(type='Collect3D', keys=['img', 'vis_info', 'gt_bboxes_3d', 'gt_labels_3d',])]
+    dict(type='Collect3D', keys=['img', 'vis_info', 'gt_bboxes_3d', 'gt_labels_3d', 'ego_vel',
+                                 'ego2cam', 'intrinsic'])]
 
 data = dict(
     samples_per_gpu=batch_size,
@@ -291,28 +292,27 @@ data = dict(
 
 optimizer = dict(
     type='AdamW2',
-    lr=2e-5,
-    # lr=0.0004,
+    lr=1e-3,
     weight_decay=0.01,
     paramwise_cfg=dict(
         custom_keys={'backbone': dict(lr_mult=0.1, decay_mult=1.0)}))
 optimizer_config = dict(grad_clip=dict(max_norm=35., norm_type=2))
 
 # learning policy
-# lr_config = dict(
-#     policy='poly',
-#     warmup='linear',
-#     warmup_iters=1,
-#     warmup_ratio=1e-6,
-#     power=1.0,
-#     min_lr=1e-6,
-#     by_epoch=False
-# )
-
 lr_config = dict(
-    policy='Fixed',  # 将策略改为固定模式
+    policy='poly',
+    warmup='linear',
+    warmup_iters=1000,
+    warmup_ratio=1e-6,
+    power=1.0,
+    min_lr=1e-6,
     by_epoch=False
 )
+
+# lr_config = dict(
+#     policy='Fixed',  # 将策略改为固定模式
+#     by_epoch=False
+# )
 
 total_epochs = 20
 checkpoint_config = dict(interval=1)
@@ -327,7 +327,7 @@ dist_params = dict(backend='nccl')
 find_unused_parameters = True  # todo: fix number of FPN outputs
 log_level = 'INFO'
 
-load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0215/epoch_20.pth'
+load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0228/epoch_4.pth'
 resume_from = None
 # resume_from = "/workspace/clean_up/fastbev/work_dirs/minjie/change_model_concat_load/epoch_2.pth"
 workflow = [('train', 1)]

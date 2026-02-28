@@ -1664,6 +1664,26 @@ class InternalRandomFlip3D(RandomFlip3D):
             new_transform = aug_transform @ transform
             cam_info['lidar2cam_rt'] = new_transform
 
+def transform_intrinsics(K, resize, crop):
+    """
+    K: 3x3 ndarray
+    resize_dims: (new_w, new_h)
+    crop: (left, top, right, bottom)
+    orig_dims: (old_w, old_h)
+    """
+    K_new = K.copy()
+    
+    # 应用缩放
+    K_new[0, 0] *= resize  # fx
+    K_new[1, 1] *= resize  # fy
+    K_new[0, 2] *= resize  # cx
+    K_new[1, 2] *= resize  # cy
+    
+    # 应用裁剪偏移
+    K_new[0, 2] -= crop[0] # cx = cx - left
+    K_new[1, 2] -= crop[1] # cy = cy - top
+    
+    return K_new
 
 @PIPELINES.register_module()
 class RandomAugImageMultiViewImage(object):
@@ -1692,6 +1712,7 @@ class RandomAugImageMultiViewImage(object):
         """
         aug_imgs = []
         aug_extrinsics = []
+        intr = []
         for cam_id, img in enumerate(results['img']):
             pil_img = Image.fromarray(img, mode='RGB')
             resize, resize_dims, crop, flip, rotate, pad = self.sample_augmentation(  # resize
@@ -1711,9 +1732,12 @@ class RandomAugImageMultiViewImage(object):
             aug_extrinsics.append(
                 self.rts2proj(results['lidar2img']['lidar2img_aug'][cam_id], post_rot, post_tran)
             )
+        for cam_id in range(2):
+            intr.append(transform_intrinsics(results['intrinsic'][cam_id], resize, crop))
         results['img'] = aug_imgs
         results['lidar2img']['extrinsic'] = aug_extrinsics
         results['img_shape'] = [img.shape for img in results['img']]
+        results['intrinsic'] = intr
         # tmp_usages for augmentated images
         if self.is_debug:
             lidar2imgs = results['lidar2img']['extrinsic']
