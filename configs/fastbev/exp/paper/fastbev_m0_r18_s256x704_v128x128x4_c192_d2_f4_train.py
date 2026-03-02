@@ -48,7 +48,7 @@ model = dict(
         alpha=0.5,
         anchor_generator=dict(
             type='AlignedAnchor3DRangeGenerator',
-            ranges=[[-25.6, 0, -1.8, 25.6, 64, -1.8]],
+            ranges=[[-25.6, 0, -1.8, 25.6, 100, -1.8]],
             # scales=[1, 2, 4],
             sizes=[
                 [0.8660, 2.5981, 1.],  # 1.5/sqrt(3)
@@ -74,7 +74,7 @@ model = dict(
         loss_dir=dict(
             type='CrossEntropyLoss', use_sigmoid=False, loss_weight=0.8)),
     multi_scale_id=[0],
-    n_voxels=[[128, 128, 4]],
+    n_voxels=[[128, 200, 4]],
     voxel_size=[[0.4, 0.5, 1.5]],
     # model training and testing settings
     train_cfg=dict(
@@ -90,7 +90,7 @@ model = dict(
         pos_weight=-1,
         debug=False),
     test_cfg=dict(
-        score_thr=0.1,
+        score_thr=0.4,
         min_bbox_size=0,
         nms_pre=1000,
         max_num=500,
@@ -103,7 +103,7 @@ model = dict(
         # Scale-NMS
         nms_type_list=[
             'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'circle'],
-        nms_thr_list=[0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.5, 0.2],
+        nms_thr_list=[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.3, 0.1],
         nms_radius_thr_list=[4, 12, 10, 10, 12, 0.85, 0.85, 0.175, 0.175, 1],
         nms_rescale_factor=[1.0, 0.7, 0.55, 0.4, 0.7, 1.0, 1.0, 4.5, 9.0, 1.0],
         test_mode = 'test_pth',
@@ -111,7 +111,7 @@ model = dict(
 )
 
 # If point cloud range is changed, the models should also change their point cloud range accordingly
-point_cloud_range = [-25.6, 0, -5, 25.6, 64.0, 3]
+point_cloud_range = [-25.6, 0, -5, 25.6, 100.0, 3]
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
@@ -232,7 +232,7 @@ data = dict(
             load_interval=1,
             sequential=True,
             n_times=4,
-            train_adj_ids=[1, 3, 5],
+            train_adj_ids=[0, 1, 2],
             speed_mode='abs_velo',
             max_interval=10,
             min_interval=0,
@@ -285,14 +285,14 @@ data = dict(
         min_interval=0,
         fix_direction=True,
         test_adj='prev',
-        test_adj_ids=[1, 3, 5],
+        test_adj_ids=[0, 1, 2],
         test_time_id=None,
     )
 )
 
 optimizer = dict(
     type='AdamW2',
-    lr=1e-3,
+    lr=1e-4,
     weight_decay=0.01,
     paramwise_cfg=dict(
         custom_keys={'backbone': dict(lr_mult=0.1, decay_mult=1.0)}))
@@ -302,10 +302,10 @@ optimizer_config = dict(grad_clip=dict(max_norm=35., norm_type=2))
 lr_config = dict(
     policy='poly',
     warmup='linear',
-    warmup_iters=1000,
+    warmup_iters=100,
     warmup_ratio=1e-6,
     power=1.0,
-    min_lr=1e-6,
+    min_lr=1e-7,
     by_epoch=False
 )
 
@@ -314,7 +314,7 @@ lr_config = dict(
 #     by_epoch=False
 # )
 
-total_epochs = 20
+total_epochs = 48
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=10,
@@ -327,7 +327,7 @@ dist_params = dict(backend='nccl')
 find_unused_parameters = True  # todo: fix number of FPN outputs
 log_level = 'INFO'
 
-load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0228/epoch_4.pth'
+load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0229_200/epoch_20.pth'
 resume_from = None
 # resume_from = "/workspace/clean_up/fastbev/work_dirs/minjie/change_model_concat_load/epoch_2.pth"
 workflow = [('train', 1)]

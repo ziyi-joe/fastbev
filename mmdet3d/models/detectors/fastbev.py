@@ -320,7 +320,7 @@ class FastBEV(BaseDetector):
                     # ########## change 1 ##############
                     # 避免后续在neck3d中reshape
                     # [C,X,Y,Z] -> [Z,C,X,Y] -> [1, Z*C, X, Y]
-                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128))
+                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 200))
                     # ########## change 1 ##############
                 volume_list.append(torch.stack(volumes))  # list([bs, 1, Z*C, H, W])
     
