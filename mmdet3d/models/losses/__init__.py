@@ -4,8 +4,9 @@ from .axis_aligned_iou_loss import AxisAlignedIoULoss, axis_aligned_iou_loss
 from .chamfer_distance import ChamferDistance, chamfer_distance
 from .paconv_regularization_loss import PAConvRegularizationLoss
 from .dice_loss import DiceLoss_zq
+from .lane_loss import DiscriminativeLoss
 __all__ = [
     'FocalLoss', 'SmoothL1Loss', 'binary_cross_entropy', 'ChamferDistance',
     'chamfer_distance', 'axis_aligned_iou_loss', 'AxisAlignedIoULoss',
-    'PAConvRegularizationLoss', 'DiceLoss_zq'
+    'PAConvRegularizationLoss', 'DiceLoss_zq', 'DiscriminativeLoss'
 ]

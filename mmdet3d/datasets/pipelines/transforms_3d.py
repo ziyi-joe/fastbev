@@ -465,7 +465,7 @@ class ObjectRangeFilter(object):
         # 只保留前向45度范围内的
         import torch
         bbox_angle = torch.atan2(gt_bboxes_3d.center[:, 0], gt_bboxes_3d.center[:, 1])
-        fov_mask = abs(bbox_angle) < torch.pi / 6.0
+        fov_mask = abs(bbox_angle) < torch.pi / 5.0
         mask = mask * fov_mask
         gt_bboxes_3d = gt_bboxes_3d[mask]
         # mask is a torch tensor but gt_labels_3d is still numpy array
@@ -1570,6 +1570,8 @@ class RandomFlip3D(RandomFlip):
                     direction, points=input_dict['points'])
             else:
                 input_dict[key].flip(direction)
+        # 翻转bev map
+        input_dict['bev_map'] = np.flip(input_dict['bev_map'], axis=1).copy()
         if 'centers2d' in input_dict:
             assert self.sync_2d is True and direction == 'horizontal', \
                 'Only support sync_2d=True and horizontal flip with images'

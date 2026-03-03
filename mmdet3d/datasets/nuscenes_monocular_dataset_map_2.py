@@ -29,23 +29,23 @@ class NuScenesMultiView_Map_Dataset2(NuScenesMultiViewDataset):
             self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
         else:
             self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
-        self.scene2map = get_scene2map(self.nusc)
-        self.maps = get_nusc_maps()
+        # self.scene2map = get_scene2map(self.nusc)
+        # self.maps = get_nusc_maps()
         # box 2d
         self.with_box2d = with_box2d
 
-        xbound = [-50, 50, 0.5]
-        ybound = [-50, 50, 0.5]
-        zbound = [-10, 10, 20.0]
-        dbound = [4.0, 45.0, 1.0]
+        # xbound = [-50, 50, 0.5]
+        # ybound = [-50, 50, 0.5]
+        # zbound = [-10, 10, 20.0]
+        # dbound = [4.0, 45.0, 1.0]
 
-        self.nx = np.array([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]], dtype='int64')
-        self.dx = np.array([row[2] for row in [xbound, ybound, zbound]])
-        self.bx = np.array([row[0] + row[2] / 2.0 for row in [xbound, ybound, zbound]])
+        # self.nx = np.array([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]], dtype='int64')
+        # self.dx = np.array([row[2] for row in [xbound, ybound, zbound]])
+        # self.bx = np.array([row[0] + row[2] / 2.0 for row in [xbound, ybound, zbound]])
 
-        self.lane_thickness = 2
-        for i in range(5):
-            print('lane thickness: {}'.format(self.lane_thickness))
+        # self.lane_thickness = 2
+        # for i in range(5):
+        #     print('lane thickness: {}'.format(self.lane_thickness))
 
         self.debug = False
 
@@ -70,21 +70,20 @@ class NuScenesMultiView_Map_Dataset2(NuScenesMultiViewDataset):
 
         if 'ann_info' in data_info:
             # get bev segm map
-            bev_seg_gt = self._get_map_by_sample_token(sample_token)  # 200, 200, 2
-            data_info['ann_info']['gt_bev_seg'] = bev_seg_gt
+            # bev_seg_gt = self._get_map_by_sample_token(sample_token)  # 200, 200, 2
+            # data_info['ann_info']['gt_bev_seg'] = bev_seg_gt
 
             # get bbox2d for camera
             if self.with_box2d:
                 camera_types = [
-                    'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
-                    'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
+                    'CAM_FRONT', 'CAM_FRONT_LEFT']
                 info = self.data_infos[index]
                 gt_bboxes_mv, gt_labels_mv, gt_bboxes_ignore_mv = [], [], []
                 for cam in camera_types:
                     gt_bboxes, gt_labels, gt_bboxes_ignore = [], [], []
                     coco_infos = get_2d_boxes(self.nusc,
                                               info['cams'][cam]['sample_data_token'],
-                                              visibilities=['', '1', '2', '3', '4'],
+                                              visibilities=['2', '3', '4'],
                                               mono3d=False)
                     for coco_info in coco_infos:
                         if coco_info is None:

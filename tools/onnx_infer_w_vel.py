@@ -236,20 +236,20 @@ def get_ego_transforms(ego_vels, ego_yawrates, dt=0.5):
 
     # 通过矩阵乘法累积到当前帧 (Target: Current Frame t)
     # T_{t-1 -> t}
-    T_1_to_curr = adj_transforms[-1]
+    T_1_to_curr = adj_transforms[0]
     
     # T_{t-2 -> t} = T_{t-1 -> t} * T_{t-2 -> t-1}
-    T_2_to_curr = T_1_to_curr @ adj_transforms[-2]
+    T_2_to_curr = T_1_to_curr @ adj_transforms[1]
     
     # T_{t-3 -> t} = T_{t-2 -> t} * T_{t-3 -> t-2}
-    T_3_to_curr = T_2_to_curr @ adj_transforms[-3]
+    T_3_to_curr = T_2_to_curr @ adj_transforms[2]
     # T_4_to_curr = T_3_to_curr @ adj_transforms[-4]
 
     return [np.eye(4), T_1_to_curr, T_2_to_curr, T_3_to_curr]
 
 
 def project_2d_to_3d(mlvl_feat, img_metas, stride):
-    n_voxels = [128, 128, 4]
+    n_voxels = [128, 200, 4]
     voxel_size = [0.4, 0.5, 1.5]
     mlvl_volumes = []
     
@@ -284,7 +284,7 @@ def project_2d_to_3d(mlvl_feat, img_metas, stride):
         volume = backproject_inplace(
             feat_i[:, :, :height, :width], points, projection)  # [c, vx, vy, vz]
         
-        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128)
+        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 200)
         volume_list.append(volume)
     return volume_list
 
@@ -434,12 +434,14 @@ def main():
             viewpad0[:intrinsic0.shape[0], :intrinsic0.shape[1]] = intrinsic0
             viewpad1[:intrinsic1.shape[0], :intrinsic1.shape[1]] = intrinsic1
             data['ego2cam'] = [ego2cam.cpu().numpy()[0].astype(np.float32) for ego2cam in data['ego2cam']]
+            # data['ego2cam'] = [np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy"),
+            #                    np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy")]
             # 重新计算外参
             for j in range(4):
-                # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2] @ lidar2ego
-                # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1] @ lidar2ego
-                img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
-                img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
+                img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2] @ lidar2ego
+                img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1] @ lidar2ego
+                # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
+                # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
         else:
             continue
 

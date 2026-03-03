@@ -218,6 +218,26 @@ def main():
         os.makedirs(save_path)
     lidar2ego = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/lidar2ego.npy")
     for i, data in tqdm(enumerate(data_loader)):
+        # breakpoint()
+        intrinsic0 = data['intrinsic'][0].cpu().numpy()[0].astype(np.float32)
+        intrinsic1 = data['intrinsic'][1].cpu().numpy()[0].astype(np.float32)
+
+        viewpad0 = np.eye(4, dtype=np.float32)
+        viewpad1 = np.eye(4, dtype=np.float32)
+        viewpad0[:intrinsic0.shape[0], :intrinsic0.shape[1]] = intrinsic0
+        viewpad1[:intrinsic1.shape[0], :intrinsic1.shape[1]] = intrinsic1
+        data['ego2cam'] = [ego2cam.cpu().numpy()[0].astype(np.float32) for ego2cam in data['ego2cam']]
+        # np.save("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy", data['ego2cam'][0])
+        # np.save("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy", data['ego2cam'][1])
+        # break
+        data['ego2cam'][0] = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy")
+        data['ego2cam'][1] = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy")
+        # lidar2ego = data['lidar2ego'][0].cpu().numpy()
+        # 重新计算外参
+        for j in range(4):
+            data['img_metas'].data[0][0]["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2] @ lidar2ego
+            data['img_metas'].data[0][0]["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1] @ lidar2ego
+        
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
         front_img = cv2.imread(data['img_metas'].data[0][0]['img_info'][0]['filename'])
@@ -234,7 +254,7 @@ def main():
         for k in keys:
             cam_output[k] = [item[k] for item in final_output_list]
         
-        # 可视化gt
+        # # 可视化gt
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)
@@ -250,9 +270,9 @@ def main():
         # for k in keys:
         #     cam_output[k] = [item[k] for item in final_output_list]
         
-        lidar2cam = data['ego2cam'][0][0] @ lidar2ego
+        lidar2cam = data['ego2cam'][0] @ lidar2ego
         intrinsic0 = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
-        show_imgs = det_post_process(result[0], front_img, lidar2cam.cpu().numpy(), intrinsic0, vis_info, 0.0, cam_output)
+        show_imgs = det_post_process(result[0], front_img, lidar2cam, intrinsic0, vis_info, 0.0, cam_output)
         cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
     
 

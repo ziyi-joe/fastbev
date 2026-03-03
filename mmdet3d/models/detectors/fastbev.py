@@ -12,6 +12,7 @@ from mmdet.models.detectors import BaseDetector
 from mmdet3d.core import bbox3d2result
 from mmseg.ops import resize
 from mmcv.runner import get_dist_info, auto_fp16
+from ..losses import DiscriminativeLoss
 
 import copy
 import onnxruntime
@@ -135,6 +136,9 @@ class FastBEV(BaseDetector):
             
         classes = ['lane_divider', 'road_divider', 'ped_crossing']
         self.seghead = SegHead(in_channels=256*4, classes=classes)
+        
+        self.lane_emb_loss = DiscriminativeLoss(embed_dim=16, delta_v=0.5, delta_d=3.0)
+        self.lane_seg_loss = torch.nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([2.13]))
 
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -371,6 +375,8 @@ class FastBEV(BaseDetector):
         B, seq, C, X, Y = x.shape
         # [bs, seq, Z*C, X, Y] -> [bs, seq*Z*C, X, Y]
         x = x.reshape(B, seq*C, X, Y)
+        
+        pred_bev_map, instance_map = self.seghead(x)
         def _inner_forward(x):
             # v1/v2: [bs, lvl*seq*c, vx, vy, vz] -> [bs, c', vx, vy]
             # v3/v4: [bs, z1*c1+z2*c2+..., vx, vy, 1] -> [bs, c', vx, vy]
@@ -382,7 +388,7 @@ class FastBEV(BaseDetector):
         else:
             x = _inner_forward(x)
 
-        return x, None, features_2d
+        return x, None, features_2d, pred_bev_map, instance_map
 
     @auto_fp16(apply_to=('img', ))
     def forward(self, img, img_metas, return_loss=True, **kwargs):
@@ -398,7 +404,7 @@ class FastBEV(BaseDetector):
         if torch.onnx.is_in_onnx_export():
             if img[0].shape == (1, 3, 256, 704):
                 return self.onnx_export_2d(img[0], img_metas)  # backbone + neck + neck_fuse
-            elif img[0].shape == (1, 256, 128, 128):
+            elif img[0].shape == (1, 256, 128, 200):
             # elif img.shape == (1, 1024, 200, 200):
                 return self.onnx_export_3d(img, img_metas)  # neck_3d: 2d -> 3d
             else:
@@ -419,7 +425,7 @@ class FastBEV(BaseDetector):
     def forward_train(
         self, img, img_metas, gt_bboxes_3d, gt_labels_3d, gt_bev_seg=None, **kwargs
     ):
-        feature_bev, valids, features_2d = self.extract_feat(img, img_metas, "train")
+        feature_bev, valids, features_2d, pred_bev_map, instance_map = self.extract_feat(img, img_metas, "train")
         """
         feature_bev: [(1, 256, 100, 100)]
         valids: (1, 1, 200, 200, 12)
@@ -432,6 +438,12 @@ class FastBEV(BaseDetector):
             x = self.bbox_head(feature_bev)
             loss_det = self.bbox_head.loss(*x, gt_bboxes_3d, gt_labels_3d, img_metas)
             losses.update(loss_det)
+            breakpoint()
+            # 计算lane loss
+            lane_seg_loss = self.lane_seg_loss(pred_bev_map, kwargs['bev_map'])
+            lane_emb_loss = self.lane_emb_loss(pred_embed, kwargs['instance_map'])
+            losses.update({"lane_seg_loss": lane_seg_loss})
+            losses.update({"lane_emb_loss": lane_emb_loss})
 
         if self.seg_head is not None:
             assert len(gt_bev_seg) == 1

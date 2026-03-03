@@ -11,6 +11,7 @@ from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
 from IPython import embed
 import ipdb
+from ...core.bbox import VectorizedLocalMap
 
 
 @PIPELINES.register_module()
@@ -1031,3 +1032,108 @@ class LoadAnnotations3D(LoadAnnotations):
         repr_str += f'{indent_str}with_bbox_depth={self.with_bbox_depth}, '
         repr_str += f'{indent_str}poly2mask={self.poly2mask})'
         return repr_str
+
+
+# 生成bev_map           
+from nuscenes import NuScenes
+from nuscenes.map_expansion.map_api import NuScenesMap
+@PIPELINES.register_module()
+class PreparePnPInput(object):
+    def __init__(self, local_mode):
+        self.BEV_H = 200
+        self.BEV_W = 128
+        print("ready for pnp input")
+        if local_mode:
+            self.nusc = NuScenes(version='v1.0-mini', dataroot='data/nuscenes_mini', verbose=False)
+            self.vector_map = VectorizedLocalMap("/root/ziyi/AEBS/data/nuscenes_mini",
+                                                 patch_size=(51.2, 100),
+                                                 canvas_size=(self.BEV_H, self.BEV_W))
+        else:
+            self.nusc = NuScenes(version='v1.0-trainval', dataroot='data/nuscenes', verbose=False)
+            self.vector_map = VectorizedLocalMap("/root/ziyi/AEBS/data/nuscenes",
+                                                 patch_size=(51.2, 100),
+                                                 canvas_size=(self.BEV_H, self.BEV_W))
+            
+        print("is ready pnp input")
+        
+    def get_bev_map(self, sample_token, ego_pose):
+        # 获取对应的地图名称
+        log_token = self.nusc.get('scene', self.nusc.get('sample', sample_token)['scene_token'])['log_token']
+        log = self.nusc.get('log', log_token)
+        map_name = log['location']
+        nusc_map = NuScenesMap(map_name=map_name, dataroot='/mnt/data/ziyi/dataset/nuscenes')
+        # 提取自车位置和朝向
+        ego_x, ego_y = ego_pose['translation'][0], ego_pose['translation'][1]
+        _, _, ego_heading = quart_to_rpy(ego_pose['rotation'])
+        layer_names = ['lane_divider', 'road_divider', 'ped_crossing']  # 车道分隔线和道路分隔线
+
+        # 计算新的中心点
+        ego_translation = np.array(ego_pose['translation'])
+        ego_rotation = Quaternion(ego_pose['rotation'])
+        center_in_ego = np.array([(self.grid_config['x'][1] - self.grid_config['x'][0])/2.0,
+                                  0.0,
+                                  0.0])
+        map_center = ego_rotation.rotate(center_in_ego) + ego_translation
+
+        # 处理车道分隔线
+        map_patch = nusc_map.get_map_mask(patch_box=(map_center[0], map_center[1],
+                                                     self.grid_config['x'][1] - self.grid_config['x'][0],
+                                                     self.grid_config['y'][1] - self.grid_config['y'][0]), 
+                                  patch_angle=ego_heading/np.pi*180 + 90,
+                                  layer_names=layer_names, 
+                                  canvas_size=(self.BEV_H, self.BEV_W))/255.0
+        return map_patch.transpose(0, 2, 1).astype(np.float32) #, seg_label.astype(np.float32)
+
+    def get_vector_map(self, sample_token, ego_pose):
+        log_token = self.nusc.get('scene', self.nusc.get('sample', sample_token)['scene_token'])['log_token']
+        location = self.nusc.get('log', log_token)['location']
+        # 计算新的中心点
+        ego_translation = np.array(ego_pose['translation'])
+        ego_rotation = Quaternion(ego_pose['rotation'])
+        center_in_ego = np.array([50.0, 0.0, 0.0])
+        map_center = ego_rotation.rotate(center_in_ego) + ego_translation
+        vectors = self.vector_map.gen_vectorized_samples(location, map_center, ego_pose['rotation'])
+        bev_map = np.zeros((4, 128, 200), dtype=np.float32)
+        bev_map[0] = 1.0
+        instance_map = np.zeros((1, 128, 200), dtype=np.float32)
+        instance = 0
+        for vector in vectors:
+            y = np.round(vector['pts'][:, 0]/0.5).astype(np.int64) + 100
+            x = 64 - np.round(vector['pts'][:, 1]/0.4).astype(np.int64)
+            valid_mask = (
+                (x >= 0) & (x < 128) &
+                (y >= 0) & (y < 200)
+            )
+            x = x[valid_mask]
+            y = y[valid_mask]
+            bev_map[:, x, y] *= 0.0
+            bev_map[vector['type'] + 1, x, y] = 1.0
+            instance_map[:, x, y] = instance
+            instance += 1
+        return bev_map, instance_map
+
+
+
+    def __call__(self, result):
+        # dict_keys(['sample_idx', 'pts_filename', 'sweeps', 'timestamp', 'frontcam_path', 
+        # 'ego_fut_gt', 'ego_hist_traj', 'ego_fut_flag', 'gt_ego_fut_vel', 'gt_ego_hist_vel', 
+        # 'gt_det_fut_traj', 'det_fut_flag', 'ego_cur_speed', 'det_attr', 'det_vel', 
+        # 'gt_det_hist_traj', 'gt_det_hist_flag', 'ann_infos', 'curr', 'adjacent', #
+        # 'img_fields', 'bbox3d_fields', 'pts_mask_fields', 'pts_seg_fields', 'bbox_fields', 
+        # 'mask_fields', 'seg_fields', 'box_type_3d', 'box_mode_3d', 'cam_names', 'canvas', 
+        # 'img_inputs', 'bev_map'])
+        sample_token = result['sample_idx']
+        sample = self.nusc.get('sample', sample_token)
+        # 获取自车姿态信息
+        sample_data_token = sample['data']['LIDAR_TOP']
+        sample_data = self.nusc.get('sample_data', sample_data_token)
+        ego_pose = self.nusc.get('ego_pose', sample_data['ego_pose_token'])
+        # result['bev_map'] = self.get_bev_map(sample_token, ego_pose) # [3, 128, 128]
+        bev_map, instance_map = self.get_vector_map(sample_token, ego_pose)
+        result['bev_map'] = bev_map
+        # import cv2
+        # cv2.imwrite("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/bev.jpg", bev_map[0]*255)
+        # breakpoint()
+        result['instance_map'] = instance_map
+
+        return result

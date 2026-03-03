@@ -311,8 +311,14 @@ class NuScenesDataset(Custom3DDataset):
                 viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
 
                 lidar2img_rt = (viewpad @ lidar2cam_rt.T)
-                ego2cam_rt = lidar2cam_rt.T @ np.linalg.inv(lidar2ego)
                 lidar2img_rts.append(lidar2img_rt)
+                # ego2cam_rt = lidar2cam_rt.T @ np.linalg.inv(lidar2ego)
+                # breakpoint()
+                ego2cam_r = np.linalg.inv(Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix)
+                ego2cam_t = cam_info['sensor2ego_translation'] @ ego2cam_r.T
+                ego2cam_rt = np.eye(4)
+                ego2cam_rt[:3, :3] = ego2cam_r
+                ego2cam_rt[:3, 3] = -ego2cam_t.T
                 ego2cam_rts.append(ego2cam_rt)
                 intrinsics.append(intrinsic)
 
@@ -331,7 +337,7 @@ class NuScenesDataset(Custom3DDataset):
                                 assert len(self.test_adj_ids) == self.n_times - 1
                                 select_id = self.test_adj_ids[time_id-1]
                                 assert self.min_interval <= select_id <= self.max_interval
-                                adjacent = {True: 'prev', False: 'next'}[select_id > 0]
+                                adjacent = {True: 'prev', False: 'next'}[select_id >= 0]
                             else:
                                 adjacent = self.test_adj
                         # stage: train
@@ -491,8 +497,8 @@ class NuScenesDataset(Custom3DDataset):
             mask = info['valid_flag']
         else:
             mask = info['num_lidar_pts'] > 0
-        gt_bboxes_3d = info['gt_boxes'][mask]
-        gt_names_3d = info['gt_names'][mask]
+        gt_bboxes_3d = info['gt_boxes']
+        gt_names_3d = info['gt_names']
         gt_labels_3d = []
         for cat in gt_names_3d:
             if cat in self.CLASSES:
@@ -502,7 +508,7 @@ class NuScenesDataset(Custom3DDataset):
         gt_labels_3d = np.array(gt_labels_3d)
 
         if self.with_velocity:
-            gt_velocity = info['gt_velocity'][mask]
+            gt_velocity = info['gt_velocity']
             nan_mask = np.isnan(gt_velocity[:, 0])
             gt_velocity[nan_mask] = [0.0, 0.0]
             gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)

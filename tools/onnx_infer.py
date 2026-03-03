@@ -229,28 +229,29 @@ def get_ego_transforms(ego_vels, ego_yawrates, dt=0.5):
 
     # 存储相邻帧之间的变换: T_{t-3->t-2}, T_{t-2->t-1}, T_{t-1->t}
     adj_transforms = []
-    for i in range(-5, -1): # 取最后几帧计算步进
+    # -1是当前帧
+    for i in range(-2, -5, -1):
         v = ego_vels[i]
         w = ego_yawrates[i]
         adj_transforms.append(get_local_transform(v, w, dt))
 
     # 通过矩阵乘法累积到当前帧 (Target: Current Frame t)
     # T_{t-1 -> t}
-    T_1_to_curr = adj_transforms[-1]
+    T_1_to_curr = adj_transforms[0]
     
     # T_{t-2 -> t} = T_{t-1 -> t} * T_{t-2 -> t-1}
-    T_2_to_curr = T_1_to_curr @ adj_transforms[-2]
+    T_2_to_curr = T_1_to_curr @ adj_transforms[1]
     
     # T_{t-3 -> t} = T_{t-2 -> t} * T_{t-3 -> t-2}
-    T_3_to_curr = T_2_to_curr @ adj_transforms[-3]
-    T_4_to_curr = T_3_to_curr @ adj_transforms[-4]
+    T_3_to_curr = T_2_to_curr @ adj_transforms[2]
+    # T_4_to_curr = T_3_to_curr @ adj_transforms[-4]
 
-    return [T_4_to_curr, T_3_to_curr, T_2_to_curr, T_1_to_curr]
+    return [np.eye(4), T_1_to_curr, T_2_to_curr, T_3_to_curr]
 
 
 def project_2d_to_3d(mlvl_feat, img_metas, stride):
-    n_voxels = [128, 128, 4]
-    voxel_size = [0.8, 0.8, 1.0]
+    n_voxels = [128, 200, 4]
+    voxel_size = [0.4, 0.5, 1.5]
     mlvl_volumes = []
     
     # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
@@ -284,7 +285,7 @@ def project_2d_to_3d(mlvl_feat, img_metas, stride):
         volume = backproject_inplace(
             feat_i[:, :, :height, :width], points, projection)  # [c, vx, vy, vz]
         
-        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 128)  # 64, 200, 200, 4 -> 4, 64, 200, 200, -> 1, 256, 200, 200
+        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 200)
         volume_list.append(volume)
     return torch.cat(volume_list, dim=0)
 
@@ -364,6 +365,7 @@ def main():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     model.eval()
+    lidar2ego = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/lidar2ego.npy")
     for i, data in tqdm(enumerate(data_loader)):
         # ego_vel / ego_yawrate 实际从链路获取，不用计算
         ego_cur_vel = data['ego_vel'].norm().item()
@@ -378,25 +380,26 @@ def main():
         img_metas = data['img_metas'].data[0][0]
         # 通过ego的速度和yaw rate计算历史ego到当前ego的转换矩阵
         # 前两帧没有历史信息，需要跳过
-        if i > 0:
-            # histego2curego_T = get_ego_transforms(ego_vels, ego_yawrates)
-            lidar2ego = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/lidar2ego.npy")
+        if i > 3:
+            histego2curego_T = get_ego_transforms(ego_vels, ego_yawrates)
             intrinsic0 = data['intrinsic'][0].cpu().numpy()[0].astype(np.float32)
             intrinsic1 = data['intrinsic'][1].cpu().numpy()[0].astype(np.float32)
 
-            breakpoint()
-            
             viewpad0 = np.eye(4, dtype=np.float32)
             viewpad1 = np.eye(4, dtype=np.float32)
             viewpad0[:intrinsic0.shape[0], :intrinsic0.shape[1]] = intrinsic0
             viewpad1[:intrinsic1.shape[0], :intrinsic1.shape[1]] = intrinsic1
             data['ego2cam'] = [ego2cam.cpu().numpy()[0].astype(np.float32) for ego2cam in data['ego2cam']]
+            # data['ego2cam'] = [np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy"),
+            #                    np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy")]
             # 重新计算外参
             for j in range(4):
                 img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2] @ lidar2ego
                 img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1] @ lidar2ego
-                # img_metas["lidar2img"]["extrinsic"][j*2] = (data['ego2img'][0].cpu().numpy()[0] @ histego2curego_T[j]).astype(np.float32)
-                # img_metas["lidar2img"]["extrinsic"][j*2+1] = (data['ego2img'][1].cpu().numpy()[0] @ histego2curego_T[j]).astype(np.float32)
+                # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
+                # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
+        else:
+            continue
 
         # 一阶段
         feat_2d = []
@@ -411,10 +414,10 @@ def main():
         bev_feat = project_2d_to_3d(feat_2d, img_metas, stride)
         # 二阶段
         input_dict = {
-            'bev_feat0': bev_feat[0:1].detach().cpu().numpy(),
-            'bev_feat1': bev_feat[1:2].detach().cpu().numpy(),
-            'bev_feat2': bev_feat[2:3].detach().cpu().numpy(),
-            'bev_feat3': bev_feat[3:4].detach().cpu().numpy(),
+            'bev_feat0': bev_feat[0].detach().cpu().numpy(),
+            'bev_feat1': bev_feat[1].detach().cpu().numpy(),
+            'bev_feat2': bev_feat[2].detach().cpu().numpy(),
+            'bev_feat3': bev_feat[3].detach().cpu().numpy(),
         }
         output = onnx_3d.run(['dir_cls_preds', 'bbox_pred', 'cls_score'], input_dict)
         dir_cls_preds = torch.from_numpy(output[0]).cuda()
@@ -452,7 +455,9 @@ def main():
         # result[0]['scores_3d'] = torch.ones(gt_len)
         
         lidar2cam = data['ego2cam'][0] @ lidar2ego
-        show_imgs = det_post_process(bbox_results[0], front_img, lidar2cam, intrinsic0, ego_cur_vel, cam_output)
+        # 因为画在原图上，此处要用resize前的内参
+        real_intr = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
+        show_imgs = det_post_process(bbox_results[0], front_img, lidar2cam, real_intr, None, ego_cur_vel, cam_output)
         cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
         print(f"img save to {save_path}/{i}.jpg")
     

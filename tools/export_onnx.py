@@ -251,7 +251,7 @@ def export_onnx(model, data, export_2d=False, export_3d=False):
 
     # 导出3D模型
     if export_3d:
-        dummy_data = torch.randn((1, 256, 128, 128)).cuda()
+        dummy_data = torch.randn((1, 256, 128, 200)).cuda()
         bev_feat = [dummy_data, dummy_data, dummy_data, dummy_data]
         # img = [dummy_data]
         onnx_path_3d = f'./work_dirs/onnx/export_3d_model.onnx'
