@@ -12,7 +12,7 @@ from mmdet.models.detectors import BaseDetector
 from mmdet3d.core import bbox3d2result
 from mmseg.ops import resize
 from mmcv.runner import get_dist_info, auto_fp16
-from ..losses import DiscriminativeLoss
+from ..losses import DiscriminativeLoss, BinaryFocalLoss
 
 import copy
 import onnxruntime
@@ -23,7 +23,10 @@ import onnxruntime as ort
 import shutil
 # import bstnnx
 
-dump_id = None
+dump_id = os.environ.get("DUMP_ID", None)
+if dump_id is not None:
+    dump_id = int(dump_id)
+dump_dir = os.environ.get("DUMP_DIR", None)
 
 class SegHead(nn.Module):
     def __init__(
@@ -34,25 +37,28 @@ class SegHead(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self.classes = classes
-        embed_dim = 16
+        instance_dim = 16
+        feat_c = 256
 
+        self.deconv = nn.Conv2d(in_channels, feat_c, 1)
+        
         self.classifier = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_c),
             nn.ReLU(True),
-            nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_c),
             nn.ReLU(True),
-            nn.Conv2d(in_channels, len(classes) + 1, 1)
+            nn.Conv2d(feat_c, 2, 1)
         )
         self.embed = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels*2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels*2),
+            nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_c),
             nn.ReLU(True),
-            nn.Conv2d(in_channels*2, in_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_c),
             nn.ReLU(True),
-            nn.Conv2d(in_channels, embed_dim, 1)
+            nn.Conv2d(feat_c, instance_dim, 1)
         )
 
     def forward(
@@ -61,6 +67,7 @@ class SegHead(nn.Module):
     ):
         if isinstance(x, (list, tuple)):
             x = x[0]
+        x = self.deconv(x)
         out = self.classifier(x)
         x_emb = self.embed(x)
         return out, x_emb
@@ -138,7 +145,10 @@ class FastBEV(BaseDetector):
         self.seghead = SegHead(in_channels=256*4, classes=classes)
         
         self.lane_emb_loss = DiscriminativeLoss(embed_dim=16, delta_v=0.5, delta_d=3.0)
-        self.lane_seg_loss = torch.nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([2.13]))
+        self.lane_seg_loss = BinaryFocalLoss(
+            gamma=1.0,
+            loss_weight=100.0
+        )
 
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -324,7 +334,7 @@ class FastBEV(BaseDetector):
                     # ########## change 1 ##############
                     # 避免后续在neck3d中reshape
                     # [C,X,Y,Z] -> [Z,C,X,Y] -> [1, Z*C, X, Y]
-                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 200))
+                    volumes.append(volume.permute(3, 0, 1, 2).reshape(1, 256, 200, 128))
                     # ########## change 1 ##############
                 volume_list.append(torch.stack(volumes))  # list([bs, 1, Z*C, H, W])
     
@@ -332,11 +342,13 @@ class FastBEV(BaseDetector):
         
         global dump_id
         if dump_id is not None:
-            dump_path = f"/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0209_dump/{dump_id}"
+            dump_path = f"{dump_dir}/{dump_id}"
             if not os.path.exists(dump_path):
                 os.makedirs(dump_path)
-            np.save(f"{dump_path}/bev_feat.npy",
-                    mlvl_volumes[0][:,0].detach().cpu().numpy())
+            np.save(f"{dump_path}/bev_feat0.npy", mlvl_volumes[0][:,0].detach().cpu().numpy())
+            np.save(f"{dump_path}/bev_feat1.npy", mlvl_volumes[0][:,1].detach().cpu().numpy())
+            np.save(f"{dump_path}/bev_feat2.npy", mlvl_volumes[0][:,2].detach().cpu().numpy())
+            np.save(f"{dump_path}/bev_feat3.npy", mlvl_volumes[0][:,3].detach().cpu().numpy())
             dump_id += 1
             if dump_id > 1000:
                 assert False
@@ -404,8 +416,7 @@ class FastBEV(BaseDetector):
         if torch.onnx.is_in_onnx_export():
             if img[0].shape == (1, 3, 256, 704):
                 return self.onnx_export_2d(img[0], img_metas)  # backbone + neck + neck_fuse
-            elif img[0].shape == (1, 256, 128, 200):
-            # elif img.shape == (1, 1024, 200, 200):
+            elif img[0].shape == (1, 256, 200, 128):
                 return self.onnx_export_3d(img, img_metas)  # neck_3d: 2d -> 3d
             else:
                 raise NotImplementedError
@@ -423,9 +434,9 @@ class FastBEV(BaseDetector):
             return self.forward_test(img, img_metas, **kwargs)
 
     def forward_train(
-        self, img, img_metas, gt_bboxes_3d, gt_labels_3d, gt_bev_seg=None, **kwargs
+        self, img, img_metas, gt_bboxes_3d, gt_labels_3d, gt_bev_seg=None, version=None, **kwargs
     ):
-        feature_bev, valids, features_2d, pred_bev_map, instance_map = self.extract_feat(img, img_metas, "train")
+        feature_bev, valids, features_2d, pred_bev_map, pred_embed = self.extract_feat(img, img_metas, "train")
         """
         feature_bev: [(1, 256, 100, 100)]
         valids: (1, 1, 200, 200, 12)
@@ -438,10 +449,14 @@ class FastBEV(BaseDetector):
             x = self.bbox_head(feature_bev)
             loss_det = self.bbox_head.loss(*x, gt_bboxes_3d, gt_labels_3d, img_metas)
             losses.update(loss_det)
-            breakpoint()
             # 计算lane loss
-            lane_seg_loss = self.lane_seg_loss(pred_bev_map, kwargs['bev_map'])
-            lane_emb_loss = self.lane_emb_loss(pred_embed, kwargs['instance_map'])
+            bev_map_loss_mask = (version==2)
+            if bev_map_loss_mask.any():
+                lane_seg_loss = 10.0 * self.lane_seg_loss(pred_bev_map[bev_map_loss_mask], kwargs['bev_map'][bev_map_loss_mask])
+                lane_emb_loss = 10.0 * self.lane_emb_loss(pred_embed[bev_map_loss_mask], kwargs['instance_map'][bev_map_loss_mask])
+            else:
+                lane_seg_loss = 0.0 * pred_bev_map.sum()
+                lane_emb_loss = 0.0 * pred_bev_map.sum()
             losses.update({"lane_seg_loss": lane_seg_loss})
             losses.update({"lane_emb_loss": lane_emb_loss})
 
@@ -556,7 +571,7 @@ class FastBEV(BaseDetector):
 
     def simple_test(self, img, img_metas, mode):
         bbox_results = []
-        feature_bev, _, features_2d = self.extract_feat(img, img_metas, mode)
+        feature_bev, _, features_2d, prev_bev, instance_map = self.extract_feat(img, img_metas, mode)
 
         if self.bbox_head is not None:
             if self.test_cfg.get('test_mode', False) == 'test_pth':
@@ -578,7 +593,7 @@ class FastBEV(BaseDetector):
             x_bev = self.seg_head(feature_bev)
             bbox_results[0]['bev_seg'] = x_bev
 
-        return bbox_results
+        return bbox_results, prev_bev, instance_map
 
     def aug_test(self, imgs, img_metas):
         img_shape_copy = copy.deepcopy(img_metas[0]['img_shape'])

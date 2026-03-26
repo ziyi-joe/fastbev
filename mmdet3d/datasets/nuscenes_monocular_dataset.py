@@ -28,7 +28,7 @@ class NuScenesMultiViewDataset(MultiViewMixin, NuScenesDataset):
         data_info = super().get_data_info(index)
         n_cameras = len(data_info['img_filename'])
         if not self.sequential:
-            assert n_cameras == 6
+            assert n_cameras == 2
 
         new_info = dict(
             sample_idx=data_info['sample_idx'],
@@ -42,21 +42,23 @@ class NuScenesMultiViewDataset(MultiViewMixin, NuScenesDataset):
             ),
             ego2cam=data_info['ego2cam'],
             intrinsic=data_info['intrinsic'],
-            lidar2ego=data_info['lidar2ego'],
             vis_info=data_info['vis_info'],
-            timestamp=data_info['timestamp'],
-            ego_vel=data_info['ego_vel']
+            ego_vel=data_info['ego_vel'],
+            version=data_info['version'],
+            lanes=data_info['lanes'],
+            lane_types=data_info['lane_types'],
         )
+        
         if 'ann_info' in data_info:
             gt_bboxes_3d = data_info['ann_info']['gt_bboxes_3d']
             gt_labels_3d = data_info['ann_info']['gt_labels_3d'].copy()
             mask = gt_labels_3d >= 0
             gt_bboxes_3d = gt_bboxes_3d[mask]
-            gt_names = data_info['ann_info']['gt_names'][mask]
+            # gt_names = data_info['ann_info']['gt_names'][mask]
             gt_labels_3d = gt_labels_3d[mask]
             new_info['ann_info'] = dict(
                 gt_bboxes_3d=gt_bboxes_3d,
-                gt_names=gt_names,
+                # gt_names=gt_names,
                 gt_labels_3d=gt_labels_3d
             )
         return new_info

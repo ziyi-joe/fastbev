@@ -41,14 +41,16 @@ model = dict(
         in_channels=192,
         feat_channels=192,
         num_convs=0,
+        neg_loss_weight=5.0,
+        pos_loss_weight=5.0,
         use_direction_classifier=True,
-        pre_anchor_topk=25,
-        bbox_thr=0.5,
-        gamma=2.0,
-        alpha=0.5,
+        pre_anchor_topk=20,
+        bbox_thr=0.55,
+        gamma=3.5,
+        alpha=0.2,
         anchor_generator=dict(
             type='AlignedAnchor3DRangeGenerator',
-            ranges=[[-25.6, 0, -1.8, 25.6, 100, -1.8]],
+            ranges=[[0, -25.6, 0.0, 100.0, 25.6, 0.0]],
             # scales=[1, 2, 4],
             sizes=[
                 [0.8660, 2.5981, 1.],  # 1.5/sqrt(3)
@@ -74,8 +76,8 @@ model = dict(
         loss_dir=dict(
             type='CrossEntropyLoss', use_sigmoid=False, loss_weight=0.8)),
     multi_scale_id=[0],
-    n_voxels=[[128, 200, 4]],
-    voxel_size=[[0.4, 0.5, 1.5]],
+    n_voxels=[[200, 128, 4]],
+    voxel_size=[[0.5, 0.4, 1.5]],
     # model training and testing settings
     train_cfg=dict(
         assigner=dict(
@@ -103,15 +105,16 @@ model = dict(
         # Scale-NMS
         nms_type_list=[
             'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'circle'],
-        nms_thr_list=[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.3, 0.1],
-        nms_radius_thr_list=[4, 12, 10, 10, 12, 0.85, 0.85, 0.175, 0.175, 1],
-        nms_rescale_factor=[1.0, 0.7, 0.55, 0.4, 0.7, 1.0, 1.0, 4.5, 9.0, 1.0],
+        nms_thr_list=[0.05, 0.1, 0.1, 0.1, 0.1, 0.05, 0.1, 0.1, 0.1, 0.1],
+        nms_radius_thr_list=[4, 12, 10, 10, 12, 0.85, 0.85, 0.175, 0.175, 0.2],
+        # 重缩放因子 - 值越大，NMS时框会被放大，抑制效果更强
+        nms_rescale_factor=[1.2, 0.7, 0.55, 0.4, 0.7, 1.2, 1.3, 4.5, 9.0, 1.2],
         test_mode = 'test_pth',
     )
 )
 
 # If point cloud range is changed, the models should also change their point cloud range accordingly
-point_cloud_range = [-25.6, 0, -5, 25.6, 100.0, 3]
+point_cloud_range = [0, -25.6, -5, 100.0, 25.6, 3]
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
@@ -153,16 +156,17 @@ file_client_args = dict(backend='disk')
 #     backend='petrel',
 #     path_mapping=dict({
 #         data_root: 'public-1424:s3://openmmlab/datasets/detection3d/nuscenes/'}))
-
+n_time = 4
+seq=True
 train_pipeline = [
-    dict(type='MultiViewPipeline', sequential=True, n_images=6, n_times=4, transforms=[
+    dict(type='MultiViewPipeline', sequential=seq, n_images=2, n_times=n_time, transforms=[
         dict(
             type='LoadImageFromFile',
             file_client_args=file_client_args)]),
     dict(type='LoadAnnotations3D',
-         with_bbox=True,
-         with_label=True,
-         with_bev_seg=True),
+         with_bbox=False,
+         with_label=False,
+         with_bev_seg=False),
     dict(
         type='LoadPointsFromFile',
         dummy=True,
@@ -170,41 +174,48 @@ train_pipeline = [
         load_dim=5,
         use_dim=5),
     dict(
-        type='RandomFlip3D',
-        flip_2d=False,
-        sync_2d=False,
-        flip_ratio_bev_horizontal=0.0,
-        flip_ratio_bev_vertical=0.5,
-        update_img2lidar=True),
-    dict(
-        type='GlobalRotScaleTrans',
-        rot_range=[-0.3925, 0.3925],
-        scale_ratio_range=[0.95, 1.05],
-        translation_std=[0.05, 0.05, 0.05],
-        update_img2lidar=True),
+        type='PreparePnPInput',
+        local_mode=local_mode,
+    ),
+    # dict(
+    #     type='RandomFlip3D',
+    #     flip_2d=False,
+    #     sync_2d=False,
+    #     flip_ratio_bev_horizontal=0.5,
+    #     flip_ratio_bev_vertical=0.0,
+    #     update_img2lidar=True),
+    # dict(
+    #     type='GlobalRotScaleTrans',
+    #     rot_range=[-0.3925, 0.3925],
+    #     scale_ratio_range=[0.95, 1.05],
+    #     translation_std=[0.05, 0.05, 0.05],
+    #     update_img2lidar=True),
     dict(type='RandomAugImageMultiViewImage', data_config=data_config),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='KittiSetOrigin', point_cloud_range=point_cloud_range),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['img', 'gt_bboxes', 'gt_labels',
-                                 'gt_bboxes_3d', 'gt_labels_3d',
-                                 'gt_bev_seg'])]
+    dict(type='Collect3D', keys=['img', 'gt_bboxes_3d', 'gt_labels_3d',
+                                 'bev_map', 'instance_map', 'version'])]
 test_pipeline = [
-    dict(type='MultiViewPipeline', sequential=True, n_images=6, n_times=4, transforms=[
+    dict(type='MultiViewPipeline', sequential=seq, n_images=6, n_times=n_time, transforms=[
         dict(
             type='LoadImageFromFile',
             file_client_args=file_client_args)]),
     dict(type='LoadAnnotations3D',
-         with_bbox=True,
-         with_label=True,
-         with_bev_seg=True),
-    dict(
-        type='LoadPointsFromFile',
-        dummy=True,
-        coord_type='LIDAR',
-        load_dim=5,
-        use_dim=5),
+         with_bbox=False,
+         with_label=False,
+         with_bev_seg=False),
+    # dict(
+    #     type='PreparePnPInput',
+    #     local_mode=local_mode,
+    # ),
+    # dict(
+    #     type='LoadPointsFromFile',
+    #     dummy=True,
+    #     coord_type='LIDAR',
+    #     load_dim=5,
+    #     use_dim=5),
     dict(type='RandomAugImageMultiViewImage', data_config=data_config, is_train=False),
     # dict(type='TestTimeAugImageMultiViewImage', data_config=data_config, is_train=False),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
@@ -218,31 +229,28 @@ data = dict(
     samples_per_gpu=batch_size,
     workers_per_gpu=4 if not local_mode else 0,
     train=dict(
-        type='CBGSDataset',
-        dataset=dict(
-            type=dataset_type,
-            data_root=data_root,
-            pipeline=train_pipeline,
-            classes=class_names,
-            modality=input_modality,
-            test_mode=False,
-            with_box2d=True,
-            box_type_3d='LiDAR',
-            ann_file='data/nuscenes/nuscenes_infos_train_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_train_4d_interval3_max60.pkl',
-            load_interval=1,
-            sequential=True,
-            n_times=4,
-            train_adj_ids=[0, 1, 2],
-            speed_mode='abs_velo',
-            max_interval=10,
-            min_interval=0,
-            fix_direction=True,
-            prev_only=True,
-            test_adj='prev',
-            test_adj_ids=[1, 3, 5],
-            test_time_id=None,
-            local_mode=local_mode
-        )
+        type=dataset_type,
+        data_root=data_root,
+        pipeline=train_pipeline,
+        classes=class_names,
+        modality=input_modality,
+        test_mode=False,
+        with_box2d=False,
+        box_type_3d='LiDAR',
+        ann_file='/root/ziyi/fastbev/data/nusc_beijing_waymo_data.pkl' if not local_mode else '/root/ziyi/fastbev/data/waymo_test_w_label.pkl',
+        load_interval=1,
+        sequential=seq,
+        n_times=n_time,
+        train_adj_ids=[1, 3, 5],
+        speed_mode='abs_velo',
+        max_interval=10,
+        min_interval=0,
+        fix_direction=True,
+        prev_only=True,
+        test_adj='prev',
+        test_adj_ids=[1, 3, 5],
+        test_time_id=None,
+        local_mode=local_mode
     ),
     val=dict(
         type=dataset_type,
@@ -253,10 +261,10 @@ data = dict(
         test_mode=True,
         with_box2d=True,
         box_type_3d='LiDAR',
-        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_val_4d_interval3_max60.pkl',
+        ann_file='/root/ziyi/fastbev/data/fast_bev_test.pkl' if not local_mode else '/root/ziyi/fastbev/data/fast_bev_test.pkl',
         load_interval=1,
-        sequential=True,
-        n_times=4,
+        sequential=seq,
+        n_times=n_time,
         train_adj_ids=[1, 3, 5],
         speed_mode='abs_velo',
         max_interval=10,
@@ -273,19 +281,19 @@ data = dict(
         classes=class_names,
         modality=input_modality,
         test_mode=True,
-        with_box2d=True,
+        with_box2d=False,
         box_type_3d='LiDAR',
-        ann_file='data/nuscenes/nuscenes_infos_val_4d_interval3_max60.pkl' if not local_mode else 'data/nuscenes_mini/nuscenes_mini_infos_val_4d_interval3_max60.pkl',
+        ann_file='/root/ziyi/fastbev/data/waymo_train_w_label.pkl' if not local_mode else '/root/ziyi/fastbev/data/waymo_test_w_label.pkl',
         load_interval=1,
-        sequential=True,
-        n_times=4,
+        sequential=seq,
+        n_times=n_time,
         train_adj_ids=[1, 3, 5],
         speed_mode='abs_velo',
         max_interval=10,
         min_interval=0,
         fix_direction=True,
         test_adj='prev',
-        test_adj_ids=[0, 1, 2],
+        test_adj_ids=[1, 3, 5],
         test_time_id=None,
     )
 )
@@ -301,11 +309,11 @@ optimizer_config = dict(grad_clip=dict(max_norm=35., norm_type=2))
 # learning policy
 lr_config = dict(
     policy='poly',
-    warmup='linear',
-    warmup_iters=100,
-    warmup_ratio=1e-6,
+    warmup=None,
+    warmup_iters=1000,
+    warmup_ratio=1e-5,
     power=1.0,
-    min_lr=1e-7,
+    min_lr=5e-5,
     by_epoch=False
 )
 
@@ -314,7 +322,7 @@ lr_config = dict(
 #     by_epoch=False
 # )
 
-total_epochs = 48
+total_epochs = 30
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=10,
@@ -322,12 +330,12 @@ log_config = dict(
         dict(type='TextLoggerHook'),
         dict(type='TensorboardLoggerHook'),
     ])
-evaluation = dict(interval=30)
+evaluation = dict(interval=50000)
 dist_params = dict(backend='nccl')
 find_unused_parameters = True  # todo: fix number of FPN outputs
 log_level = 'INFO'
 
-load_from = '/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/0229_200/epoch_20.pth'
+load_from = 'work_dirs/0319/epoch_30.pth'
 resume_from = None
 # resume_from = "/workspace/clean_up/fastbev/work_dirs/minjie/change_model_concat_load/epoch_2.pth"
 workflow = [('train', 1)]

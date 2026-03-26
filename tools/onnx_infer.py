@@ -35,6 +35,7 @@ import numpy as np
 from collections import deque
 from pyquaternion import Quaternion
 from infer_diffential import cal_cam_output
+from sklearn.cluster import DBSCAN
 
 
 def parse_args():
@@ -250,8 +251,8 @@ def get_ego_transforms(ego_vels, ego_yawrates, dt=0.5):
 
 
 def project_2d_to_3d(mlvl_feat, img_metas, stride):
-    n_voxels = [128, 200, 4]
-    voxel_size = [0.4, 0.5, 1.5]
+    n_voxels = [200, 128, 4]
+    voxel_size = [0.5, 0.4, 1.5]
     mlvl_volumes = []
     
     # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
@@ -285,9 +286,189 @@ def project_2d_to_3d(mlvl_feat, img_metas, stride):
         volume = backproject_inplace(
             feat_i[:, :, :height, :width], points, projection)  # [c, vx, vy, vz]
         
-        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 128, 200)
+        volume = volume.permute(3, 0, 1, 2).reshape(1, 256, 200, 128)
         volume_list.append(volume)
-    return torch.cat(volume_list, dim=0)
+    return volume_list
+
+
+def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, -25.6)):
+    """
+    车道线后处理：从 bev_map 和 instance_map 提取向量化车道线
+
+    Args:
+        bev_map: [1, 4, 200, 128] 语义分割图
+            C维度: 0=空白, 1=divider(车道线), 2=crossing(人行横道), 3=curb(路沿)
+        instance_map: [1, 16, 200, 128] 实例嵌入图
+            同一instance的像素在channel维度距离较近
+        voxel_size: (dx, dy) 每个voxel的物理尺寸(米)
+        pc_range: (x_min, y_min) 点云范围起点
+
+    Returns:
+        list of dict: 每个dict包含:
+            - 'category': 类别名称 ('divider', 'crossing', 'curb')
+            - 'class_id': 类别ID (1, 2, 3)
+            - 'points': Nx2 array, 自车坐标系下的(x, y)坐标
+    """
+    if isinstance(bev_map, torch.Tensor):
+        bev_map = bev_map[0].cpu().numpy()  # [4, 200, 128]
+    if isinstance(instance_map, torch.Tensor):
+        instance_map = instance_map[0].cpu().numpy()  # [16, 200, 128]
+
+    # 获取语义分割结果 (argmax)
+    semantic_map = np.argmax(bev_map, axis=0)  # [200, 128]
+
+    # 类别映射
+    category_map = {0: 'divider', 1: 'crossing'}
+
+    # 存储所有车道线向量
+    lane_vectors = []
+
+    # 对每个类别分别处理
+    cls_thr = [0.55, 0.5, 0.42]
+    for class_id, category_name in category_map.items():
+        # 获取当前类别的mask
+        # class_mask = (semantic_map == class_id)  # [200, 128]
+        class_mask = (bev_map[class_id] > cls_thr[class_id])
+
+        if not np.any(class_mask):
+            continue
+
+        # 获取该类别像素的instance embedding
+        ys, xs = np.where(class_mask)
+        if len(xs) < 3:  # 像素太少，跳过
+            continue
+
+        # 提取这些像素的embedding [N, 16]
+        embeddings = instance_map[:, ys, xs].T  # [N, 16]
+
+        # 使用DBSCAN聚类实例
+        # 同一instance的像素embedding距离较近
+        clustering = DBSCAN(eps=2.0, min_samples=5, metric='euclidean')
+        labels = clustering.fit_predict(embeddings)
+
+        # 对每个实例进行处理
+        unique_labels = set(labels) - {-1}  # 排除噪声点
+
+        for inst_label in unique_labels:
+            # 获取该实例的像素坐标
+            inst_mask = (labels == inst_label)
+            inst_ys = ys[inst_mask]
+            inst_xs = xs[inst_mask]
+
+            if len(inst_xs) < 3:  # 像素太少
+                continue
+
+            # 将像素坐标转换为自车坐标系
+            # BEV图: 行对应x轴(前向), 列对应y轴(横向)
+            # 行索引0对应x_min(近处), 行索引199对应x_max(远处)
+            # 列索引0对应y_min(左侧), 列索引127对应y_max(右侧)
+
+            # 方法1: 使用拟合+排序来得到有序点集
+            points = pixel_to_ego_coords(inst_xs, inst_ys, voxel_size, pc_range)
+
+            # 对点进行排序，使其成为有序向量
+            ordered_points = order_points_to_vector(points)
+
+            if len(ordered_points) >= 3:
+                lane_vectors.append({
+                    'category': category_name,
+                    'class_id': class_id,
+                    'points': ordered_points
+                })
+
+    return lane_vectors
+
+
+def pixel_to_ego_coords(xs, ys, voxel_size=(0.5, 0.4), pc_range=(0, -25.6)):
+    """
+    将像素坐标转换为自车坐标系
+
+    Args:
+        xs: 像素的列坐标 (y方向)
+        ys: 像素的行坐标 (x方向)
+        voxel_size: (dx, dy) 物理尺寸
+        pc_range: (x_min, y_min) 点云范围
+
+    Returns:
+        points: Nx2 array, (x, y) 坐标
+    """
+    dx, dy = voxel_size
+    x_min, y_min = pc_range
+
+    # BEV图的行对应x轴(前向)，列对应y轴(横向)
+    # x = x_min + row * dx
+    # y = y_min + col * dy
+    x_coords = x_min + ys * dx
+    y_coords = y_min + xs * dy
+
+    points = np.stack([x_coords, y_coords], axis=1)
+    return points
+
+
+def order_points_to_vector(points):
+    """
+    将无序点集排序为有序向量
+
+    Args:
+        points: Nx2 array, 无序的(x, y)坐标
+
+    Returns:
+        ordered_points: Mx2 array, 有序的(x, y)坐标
+    """
+    if len(points) < 3:
+        return points
+
+    # 使用基于距离的方法排序
+    # 方法: 找到距离最远的两个点作为端点，然后沿着主轴方向排序
+
+    # 1. 计算主方向 (PCA)
+    centered = points - points.mean(axis=0)
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eig(cov)
+    main_dir = eigenvectors[:, np.argmax(eigenvalues)]
+
+    # 2. 沿主方向投影并排序
+    projections = centered @ main_dir
+    sorted_indices = np.argsort(projections)
+    ordered_points = points[sorted_indices]
+
+    # 3. (可选) 对点进行稀疏化，减少点数
+    # 使用 Douglas-Peucker 算法或简单采样
+    ordered_points = simplify_points(ordered_points, min_distance=0.3)
+
+    return ordered_points
+
+
+def simplify_points(points, min_distance=0.3):
+    """
+    简化点集，保持最小距离
+
+    Args:
+        points: Nx2 array
+        min_distance: 点之间的最小距离(米)
+
+    Returns:
+        simplified_points: Mx2 array
+    """
+    if len(points) <= 2:
+        return points
+
+    simplified = [points[0]]
+    for i in range(1, len(points)):
+        dist = np.linalg.norm(points[i] - simplified[-1])
+        if dist >= min_distance:
+            simplified.append(points[i])
+
+    # 确保最后一个点被包含
+    if np.linalg.norm(points[-1] - simplified[-1]) > 0.1:
+        simplified.append(points[-1])
+
+    return np.array(simplified)
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
 
 def main():
     args = parse_args()
@@ -350,14 +531,14 @@ def main():
 
     model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
 
-    onnx_2d = ort.InferenceSession("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/onnx/simplified_export_2d_model.onnx")
-    onnx_3d = ort.InferenceSession("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/onnx/simplified_export_3d_model.onnx")
+    onnx_2d = ort.InferenceSession("work_dirs/onnx/simplified_export_2d_model.onnx")
+    onnx_3d = ort.InferenceSession("work_dirs/onnx/simplified_export_3d_model.onnx")
     
     bbox_infos = deque([{}, {}, {}])
-    ego_vels = deque([0, 0, 0])
-    ego_yawrates = deque([0, 0, 0])
+    ego_vels = deque([])
+    ego_yawrates = deque([])
     DT = 0.5
-    track_len = 5
+    track_len = 3
     det_thresh = 0.3
     ego_last_heading = 0.0
     
@@ -365,15 +546,14 @@ def main():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     model.eval()
-    lidar2ego = np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/lidar2ego.npy")
     for i, data in tqdm(enumerate(data_loader)):
         # ego_vel / ego_yawrate 实际从链路获取，不用计算
-        ego_cur_vel = data['ego_vel'].norm().item()
+        ego_cur_vel = data['ego_vel']# .norm().item()
         ego_vels.append(ego_cur_vel)
         ego_cur_heading = Quaternion(data['vis_info']['ego2global_rotation']).yaw_pitch_roll[0]
         ego_yawrates.append((ego_cur_heading-ego_last_heading) / DT)
         ego_last_heading = ego_cur_heading
-        if len(ego_vels) > track_len:
+        if len(ego_vels) > 4:
             ego_vels.popleft()
             ego_yawrates.popleft()
         img = data['img'].data[0][0]
@@ -393,13 +573,11 @@ def main():
             # data['ego2cam'] = [np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy"),
             #                    np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy")]
             # 重新计算外参
-            for j in range(4):
-                img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2] @ lidar2ego
-                img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1] @ lidar2ego
+            # for j in range(4):
+            #     img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2]
+            #     img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1]
                 # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
                 # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
-        else:
-            continue
 
         # 一阶段
         feat_2d = []
@@ -419,10 +597,12 @@ def main():
             'bev_feat2': bev_feat[2].detach().cpu().numpy(),
             'bev_feat3': bev_feat[3].detach().cpu().numpy(),
         }
-        output = onnx_3d.run(['dir_cls_preds', 'bbox_pred', 'cls_score'], input_dict)
+        output = onnx_3d.run(['dir_cls_preds', 'bbox_pred', 'cls_score', 'pred_bev_map', 'instance_map'], input_dict)
         dir_cls_preds = torch.from_numpy(output[0]).cuda()
         bbox_pred = torch.from_numpy(output[1]).cuda()
         cls_score = torch.from_numpy(output[2]).cuda()
+        bev_map = sigmoid(output[3][0])
+        instance_map = sigmoid(output[4][0])
         # 解算box
         bbox_list = model.bbox_head.get_bboxes([cls_score], [bbox_pred], [dir_cls_preds], [img_metas])
         bbox_results = [
@@ -449,15 +629,34 @@ def main():
                                     max_connect_dist=3.0,
                                     main_obstacle_thresh=3.0,
                                     dangerous_thresh=1.0)
+        # 车道线后处理
+        lane_vectors = lane_postprocess(bev_map, instance_map)
+        ego2cam = data['ego2cam'][0]
+        # 因为画在原图上，此处要用resize前的内参
+        real_intr = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
+        bev_clr = {
+            "divider": [0, 255, 0],
+            "crossing": [255, 0, 0],
+        }
+        # 投影到前视图上可视化
+        for vector in lane_vectors:
+            points = vector['points']
+            points_ego_homogeneous = \
+                np.concatenate([points, np.zeros((points.shape[0], 1), dtype=points.dtype),
+                                np.ones((points.shape[0], 1), dtype=points.dtype)
+                                ], axis=1)
+            points_camera = (points_ego_homogeneous @ ego2cam.T)[:, :3]
+            points_camera = points_camera / points_camera[:, 2:3]
+            points_img = (points_camera @ real_intr.T)[:, :2]
+            for point in points_img:
+                cv2.circle(front_img, point.astype(np.int64), radius=5, color=bev_clr[vector['category']], thickness=-1)
         
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)
         
-        lidar2cam = data['ego2cam'][0] @ lidar2ego
-        # 因为画在原图上，此处要用resize前的内参
-        real_intr = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
-        show_imgs = det_post_process(bbox_results[0], front_img, lidar2cam, real_intr, None, ego_cur_vel, cam_output)
+        
+        show_imgs = det_post_process(bbox_results[0], front_img, ego2cam, real_intr, None, ego_cur_vel, cam_output)
         cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
         print(f"img save to {save_path}/{i}.jpg")
     

@@ -25,26 +25,21 @@ class MultiViewPipeline:
         lidar2img_aug = []
         ego2cam = []
         if not self.sequential:
-            assert len(results['img_info']) == 6
+            assert len(results['img_info']) == self.n_images
             # ids = np.arange(len(results['img_info']))
             # replace = True if self.n_images > len(ids) else False
             # ids = np.random.choice(ids, self.n_images, replace=replace)
-            ids = np.array([0, 2])
+            selected_cam_indices = [0, 1]
+            ids = np.array([0, 1])
             ids_list = sorted(ids)  # sort & tolist
         else:
-            assert len(results['img_info']) == 6 * self.n_times, f'img info: {len(results["img_info"])}, n_times: {self.n_times}'
+            assert len(results['img_info']) == 2 * self.n_times, f'img info: {len(results["img_info"])}, n_times: {self.n_times}'
             # ids_list = np.arange(len(results['img_info'])).tolist()
             # 定义每一帧中我们想要的相机相对索引
-            selected_cam_indices = [0, 2] # 0: FRONT, 2: FRONT_LEFT
+            selected_cam_indices = [0, 1] # 0: FRONT, 2: FRONT_LEFT
             
-            ids_list = []
-            # 遍历每一帧（t=0, t-1, t-2...）
-            for t in range(self.n_times):
-                for cam_idx in selected_cam_indices:
-                    # 计算在全球索引中的位置
-                    # 第一帧是 0-5，第二帧是 6-11，以此类推
-                    global_idx = t * 6 + cam_idx
-                    ids_list.append(global_idx)
+            ids_list = [0, 1, 2, 3, 4, 5, 6, 7]
+
         for i in ids_list:
             _results = dict()
             for key in ['img_prefix', 'img_info']:

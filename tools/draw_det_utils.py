@@ -113,6 +113,101 @@ def lidar2img(points_lidar, lidar2camera, intrinsic, info):
     return points_img, valid
 
 
+def lidar2camera_coords(points_lidar, lidar2camera):
+    """将 LiDAR 坐标转换为相机坐标系下的 3D 坐标（不做投影）"""
+    points_lidar_homogeneous = np.concatenate(
+        [points_lidar, np.ones((points_lidar.shape[0], 1), dtype=points_lidar.dtype)], axis=1)
+    points_camera_homogeneous = points_lidar_homogeneous @ lidar2camera.T
+    return points_camera_homogeneous[:, :3]
+
+
+def project_camera_to_img(points_camera, intrinsic):
+    """将相机坐标系下的 3D 点投影到图像平面"""
+    # 只对有效点做透视除法
+    points_img = points_camera.copy()
+    valid = points_img[:, 2] > 0.5
+    # 避免除零
+    z_safe = np.where(points_img[:, 2:3] > 0.5, points_img[:, 2:3], 1.0)
+    points_normalized = points_img[:, :3] / z_safe
+    points_img_2d = points_normalized @ intrinsic.T
+    return points_img_2d[:, :2], valid
+
+
+def clip_line_at_camera_plane(p1_cam, p2_cam, z_threshold=0.5):
+    """
+    在相机平面 z=z_threshold 处裁剪线段
+
+    Args:
+        p1_cam, p2_cam: 相机坐标系下的两个 3D 端点
+        z_threshold: 相机前方阈值
+
+    Returns:
+        p1_clip, p2_clip: 裁剪后的两个端点
+        should_draw: 是否应该绘制这条线
+    """
+    z1, z2 = p1_cam[2], p2_cam[2]
+
+    # 两点都在前方，不需要裁剪
+    if z1 >= z_threshold and z2 >= z_threshold:
+        return p1_cam.copy(), p2_cam.copy(), True
+
+    # 两点都在后方，不绘制
+    if z1 < z_threshold and z2 < z_threshold:
+        return None, None, False
+
+    # 一个在前一个在后，计算与 z=z_threshold 平面的交点
+    t = (z_threshold - z1) / (z2 - z1)
+
+    # 交点坐标
+    p_clip = p1_cam + t * (p2_cam - p1_cam)
+
+    if z1 < z_threshold:
+        # p1 在后，用交点替换 p1
+        return p_clip, p2_cam.copy(), True
+    else:
+        # p2 在后，用交点替换 p2
+        return p1_cam.copy(), p_clip, True
+
+
+def clip_line_to_img_bounds(p1, p2, width, height):
+    """
+    将 2D 线段裁剪到图像边界内 (Cohen-Sutherland 简化版)
+
+    Args:
+        p1, p2: 两个 2D 端点 (x, y)
+        width, height: 图像尺寸
+
+    Returns:
+        p1_clip, p2_clip: 裁剪后的端点
+        should_draw: 是否应该绘制
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+
+    # 参数化裁剪
+    t_min, t_max = 0.0, 1.0
+    dx, dy = x2 - x1, y2 - y1
+
+    # 检查四条边界: x=0, x=width, y=0, y=height
+    for p, q in [(x1, -dx), (width - x1, dx), (y1, -dy), (height - y1, dy)]:
+        if abs(q) < 1e-6:
+            # 线段平行于边界
+            if p < 0:
+                return None, None, False  # 线段完全在边界外
+        else:
+            t = p / q
+            if q < 0:
+                t_min = max(t_min, t)
+            else:
+                t_max = min(t_max, t)
+            if t_min > t_max:
+                return None, None, False  # 线段完全在边界外
+
+    new_p1 = (int(x1 + t_min * dx), int(y1 + t_min * dy))
+    new_p2 = (int(x1 + t_max * dx), int(y1 + t_max * dy))
+    return new_p1, new_p2, True
+
+
 def check_point_in_img(points, height, width):
     valid = np.logical_and(points[:, 0] >= 0, points[:, 1] >= 0)
     valid = np.logical_and(
@@ -142,6 +237,21 @@ def write_text(img, text, pos):
     img = cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
     return img
 
+
+color_map = {
+    0: (255, 255, 0),   # 亮黄 (Yellow) - car
+    1: (0, 255, 255),   # 青色 (Cyan)   - 
+    2: (255, 0, 255),   # 品红 (Magenta)- 
+    3: (0, 255, 0),     # 纯绿 (Green)  - 
+    4: (0, 0, 255),     # 纯蓝 (Blue)   - 
+    5: (255, 0, 0),     # 纯红 (Red)    - 
+    6: (255, 165, 0),   # 橙色 (Orange) - motocycle
+    7: (128, 0, 128),   # 深紫 (Purple) - bicycle
+    8: (0, 128, 128),   # 深青 (Teal)   - ped
+    9: (128, 128, 128)  # 灰色 (Gray)   - traffic cone
+}
+
+
 def det_post_process(pts_bbox, img, lidar2camera, intrinsic, info, ego_cur_vel=0.0, cam_output=None):
     from mmdet3d.core import bbox3d2result
     from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes as LB
@@ -154,44 +264,60 @@ def det_post_process(pts_bbox, img, lidar2camera, intrinsic, info, ego_cur_vel=0
     corners_ego = pts_bbox['boxes_3d'].corners.numpy()
     corners_ego = corners_ego.reshape(-1, 3)
     pred_flag = np.ones((corners_ego.shape[0] // 8, ), dtype=np.bool)
-    
+
     imgs = []
     views = ['CAM_FRONT']
+    img_height, img_width = img.shape[0], img.shape[1]
+
     for view in views:
-        # corners_img, valid = lidar2img(corners_lidar, infos)
-        corners_img, valid = lidar2img(corners_ego, lidar2camera, intrinsic, info)
-        valid = np.logical_and(
-            valid,
-            check_point_in_img(corners_img, img.shape[0], img.shape[1]))
-        valid = valid.reshape(-1, 8)
-        # print(valid)
-        corners_img = corners_img.reshape(-1, 8, 2).astype(np.int)
+        # 1. 获取相机坐标系下的 3D 角点
+        corners_camera = lidar2camera_coords(corners_ego, lidar2camera)
+        corners_camera = corners_camera.reshape(-1, 8, 3)
+
+        # 2. 投影到图像平面（用于文字显示位置计算）
+        corners_img_flat, _ = project_camera_to_img(corners_ego, intrinsic)
+        corners_img_for_text = corners_img_flat.reshape(-1, 8, 2).astype(np.int)
+
         cam_idx = 0
-        for aid in range(valid.shape[0]):
-            # if pts_bbox['scores_3d'][aid] < 0.4:
-            #     continue
+        for aid in range(corners_camera.shape[0]):
             is_dangerous = False
             if cam_output is not None:
                 vx = cam_output['Obstacle_Rel_Vel_X'][cam_idx]
                 vy = cam_output['Obstacle_Rel_Vel_Y'][cam_idx]
                 vel = np.sqrt(vx**2 + vy**2)
-                pos = ((corners_img[aid][0] + corners_img[aid][1]) / 2.0).astype(np.int64)
+                pos = ((corners_img_for_text[aid][0] + corners_img_for_text[aid][1]) / 2.0).astype(np.int64)
                 ttc = cam_output['Obstacle_TTC'][cam_idx]
                 # 只是为了可视化临时取3.0阈值，后续根据实际需求调整
                 if ttc < 3.0:
                     is_dangerous = True
                 img = write_text(img, f"{vel:.1f}m/s", pos + np.array([-20, -80]))
                 cam_idx += 1
-                
+
+            # color = color_map[pts_bbox['labels_3d'][aid].item()]
+            # 3. 绘制每条边，使用正确的裁剪逻辑
             for index in draw_boxes_indexes_img_view:
                 color = color_map[int(pred_flag[aid])] if not is_dangerous else (0, 0, 255)
-                if valid[aid, index[0]] and valid[aid, index[1]]:
-                    cv2.line(
-                        img,
-                        corners_img[aid, index[0]],
-                        corners_img[aid, index[1]],
-                        color=color,
-                        thickness=2)
+
+                p1_cam = corners_camera[aid, index[0]]
+                p2_cam = corners_camera[aid, index[1]]
+
+                # 在相机平面处裁剪
+                p1_clip, p2_clip, should_draw = clip_line_at_camera_plane(p1_cam, p2_cam)
+
+                if should_draw:
+                    # 投影到图像
+                    pts_cam = np.array([p1_clip, p2_clip])
+                    pts_img, _ = project_camera_to_img(pts_cam, intrinsic)
+
+                    p1_img = pts_img[0].astype(int)
+                    p2_img = pts_img[1].astype(int)
+
+                    # 裁剪到图像边界
+                    p1_img, p2_img, should_draw = clip_line_to_img_bounds(
+                        p1_img, p2_img, img_width, img_height)
+
+                    if should_draw:
+                        cv2.line(img, tuple(p1_img), tuple(p2_img), color=color, thickness=2)
 
         imgs.append(img)
     return imgs

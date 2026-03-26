@@ -2,6 +2,52 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.75, reduction='mean', loss_weight=1.0):
+        super(BinaryFocalLoss, self).__init__()
+        self.gamma = gamma
+        # 针对严重漏检，将 alpha 调高，偏向正样本（车道线/边界）
+        self.alpha = torch.tensor([[0.8, 0.8]]) 
+        self.reduction = reduction
+        self.loss_weight = loss_weight
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: logits with shape (B, N, H, W)
+            target: float targets with shape (B, N, H, W)
+        """
+        # 1. 计算 sigmoid 概率
+        pred_sigmoid = pred.sigmoid()
+        target = target.type_as(pred)
+
+        # 2. 计算 pt (模型对真值的预测概率)
+        # 当 target=1 时，pt = pred_sigmoid
+        # 当 target=0 时，pt = 1 - pred_sigmoid
+        pt = (pred_sigmoid * target) + ((1 - pred_sigmoid) * (1 - target))
+        
+        # 3. 计算 Focal Weight
+        # 这里的 alpha 处理：给正样本 alpha 权重，给负样本 (1-alpha) 权重
+        self.alpha = self.alpha.to(pred.device)
+        alpha_weight = (self.alpha[:, :, None, None] * target + (1 - self.alpha)[:, :, None, None] * (1 - target))
+        
+        # 调节因子：(1-pt)^gamma。当预测越准时（pt接近1），权重越小
+        focal_weight = alpha_weight * (1 - pt).pow(self.gamma)
+
+        # 4. 计算 BCE Loss 并加权
+        # 使用 binary_cross_entropy_with_logits 保证数值稳定性
+        bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+        loss = bce_loss * focal_weight
+
+        # 5. Reduction
+        if self.reduction == 'mean':
+            # 注意：在稀疏任务中，有时 sum(loss) / num_positive_samples 效果更好
+            loss = loss.mean()
+        elif self.reduction == 'sum':
+            loss = loss.sum()
+
+        return loss * self.loss_weight
+
 class DiscriminativeLoss(nn.Module):
     def __init__(self, embed_dim, delta_v, delta_d):
         super(DiscriminativeLoss, self).__init__()

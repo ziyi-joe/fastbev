@@ -63,8 +63,8 @@ class VectorizedLocalMap(object):
         # ped_vector_list = self.ped_geoms_to_vectors(ped_geom)
         ped_vector_list = self.line_geoms_to_vectors(ped_geom)['ped_crossing']
 
-        polygon_geom = self.get_map_geom(patch_box, patch_angle, self.polygon_classes, location)
-        poly_bound_list = self.poly_geoms_to_vectors(polygon_geom)
+        # polygon_geom = self.get_map_geom(patch_box, patch_angle, self.polygon_classes, location)
+        # poly_bound_list = self.poly_geoms_to_vectors(polygon_geom)
 
         vectors = []
         for line_type, vects in line_vector_dict.items():
@@ -74,8 +74,8 @@ class VectorizedLocalMap(object):
         for ped_line, length in ped_vector_list:
             vectors.append((ped_line.astype(float), length, CLASS2LABEL.get('ped_crossing', -1)))
 
-        for contour, length in poly_bound_list:
-            vectors.append((contour.astype(float), length, CLASS2LABEL.get('contours', -1)))
+        # for contour, length in poly_bound_list:
+        #     vectors.append((contour.astype(float), length, CLASS2LABEL.get('contours', -1)))
 
         # filter out -1
         filtered_vectors = []

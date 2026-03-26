@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import pyquaternion
 import tempfile
+import copy
 from nuscenes.utils.data_classes import Box as NuScenesBox
 from os import path as osp
 from pyquaternion import Quaternion
@@ -178,6 +179,18 @@ class NuScenesDataset(Custom3DDataset):
         self.speed_mode = speed_mode
         self.fix_direction = fix_direction
         self.verbose = verbose
+        self.test_mode = test_mode
+        self.vis_cam = {
+            "nusc": "FRONT",
+            "beijing": "FRONT",
+            "waymo": "FRONT"
+        }
+        self.version = {
+            "nusc": 0,
+            "beijing": 1,
+            "waymo": 2
+        }
+
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
@@ -213,10 +226,13 @@ class NuScenesDataset(Custom3DDataset):
             list[dict]: List of annotations sorted by timestamps.
         """
         data = mmcv.load(ann_file)
-        data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        if not self.test_mode:
+            data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        else:
+            data_infos = data['infos']
         data_infos = data_infos[::self.load_interval]
-        self.metadata = data['metadata']
-        self.version = self.metadata['version']
+        # self.metadata = data['metadata']
+        # self.version = self.metadata['version']
         return data_infos
 
     def get_data_info(self, index):
@@ -239,17 +255,19 @@ class NuScenesDataset(Custom3DDataset):
                 - ann_info (dict): Annotation info.
         """
         info = self.data_infos[index]
+        version = info['version']
+        vis_cam = self.vis_cam[version]
         vis_info = dict(
             lidar2ego_rotation=info['lidar2ego_rotation'],
             lidar2ego_translation=info['lidar2ego_translation'],
             ego2global_rotation=info['ego2global_rotation'],
             ego2global_translation=info['ego2global_translation'],
-            sensor2lidar_rotation=info['cams']['CAM_FRONT']['sensor2lidar_rotation'],
-            sensor2lidar_translation=info['cams']['CAM_FRONT']['sensor2lidar_translation'],
-            cam_intrinsic=info['cams']['CAM_FRONT']['cam_intrinsic'],
+            sensor2lidar_rotation=info['cams'][vis_cam]['sensor2lidar_rotation'],
+            sensor2lidar_translation=info['cams'][vis_cam]['sensor2lidar_translation'],
+            cam_intrinsic=info['cams'][vis_cam]['cam_intrinsic'],
             cam_info=dict(
-                ego2global_translation=info['cams']['CAM_FRONT']['ego2global_translation'],
-                ego2global_rotation=info['cams']['CAM_FRONT']['ego2global_rotation']
+                ego2global_translation=info['cams'][vis_cam]['ego2global_translation'],
+                ego2global_rotation=info['cams'][vis_cam]['ego2global_rotation']
             )
         )
         # standard protocal modified from SECOND.Pytorch
@@ -260,6 +278,8 @@ class NuScenesDataset(Custom3DDataset):
             timestamp=info['timestamp'] / 1e6,
             ego_vel=info['velo'],
             vis_info=vis_info,
+            lanes=info['lanes'] if version == "waymo" else None,
+            lane_types=info['lane_types'] if version == "waymo" else None,
         )
         if self.modality['use_camera']:
             image_paths = []
@@ -295,10 +315,16 @@ class NuScenesDataset(Custom3DDataset):
                 lidar2cam_rt[3, :3] = -lidar2cam_t
 
                 # keep aug rts
+                if version == "beijing" or version == "waymo":
+                    rot = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
+                    tran = cam_info['sensor2ego_translation']
+                elif version == "nusc":
+                    rot = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
+                    tran = cam_info['sensor2ego_translation']
                 lidar2img_aug = {
                     'intrin': cam_info['cam_intrinsic'],
-                    'rot': cam_info['sensor2lidar_rotation'],
-                    'tran': cam_info['sensor2lidar_translation'],
+                    'rot': rot,
+                    'tran': tran,
                     'post_rot': np.eye(3),
                     'post_tran': np.zeros(3),
                 }
@@ -325,11 +351,20 @@ class NuScenesDataset(Custom3DDataset):
             if self.sequential:
                 adjacent_type_list = []
                 adjacent_id_list = []
+                if version == "beijing" or version=="waymo":
+                    # 使用深拷贝，避免浅拷贝导致 RandomFlip3D 修改时影响所有帧
+                    image_paths = copy.deepcopy(image_paths) * self.n_times
+                    lidar2img_rts = [copy.deepcopy(x) for _ in range(self.n_times) for x in lidar2img_rts]
+                    lidar2img_augs = [copy.deepcopy(x) for _ in range(self.n_times) for x in lidar2img_augs]
+                    lidar2img_extras = copy.deepcopy(lidar2img_extras) * self.n_times
+                    ego2cam_rts = copy.deepcopy(ego2cam_rts) * self.n_times
                 for time_id in range(1, self.n_times):
+                    if version == "beijing" or version=="waymo":
+                        break
                     if info['prev'] is None or info['next'] is None:
                         adjacent = 'prev' if info['next'] is None else 'next'
                     else:
-                        if self.prev_only or self.next_only:
+                        if self.prev_only or self.next_only: # 训练的时候是prev_only
                             adjacent = 'prev' if self.prev_only else 'next'
                         # stage: test
                         elif self.test_mode:
@@ -392,11 +427,12 @@ class NuScenesDataset(Custom3DDataset):
                     egoadj2global = np.eye(4, dtype=np.float32)
                     egoadj2global[:3, :3] = Quaternion(info_adj['ego2global_rotation']).rotation_matrix
                     egoadj2global[:3, 3] = info_adj['ego2global_translation']
-                    lidar2ego = np.eye(4, dtype=np.float32)
-                    lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
-                    lidar2ego[:3, 3] = info['lidar2ego_translation']
+                    # lidar2ego = np.eye(4, dtype=np.float32)
+                    # lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+                    # lidar2ego[:3, 3] = info['lidar2ego_translation']
                     lidaradj2lidarcurr = np.linalg.inv(lidar2ego) @ np.linalg.inv(egocurr2global) \
                         @ egoadj2global @ lidar2ego
+                    egoadj2egocurr = np.linalg.inv(egocurr2global) @ egoadj2global
 
                     kws_adj = [
                         'ego2global_translation',
@@ -409,7 +445,8 @@ class NuScenesDataset(Custom3DDataset):
                         mat = np.eye(4, dtype=np.float32)
                         mat[:3, :3] = lidar2img_aug['rot']
                         mat[:3, 3] = lidar2img_aug['tran']
-                        mat = lidaradj2lidarcurr @ mat
+                        # mat = lidaradj2lidarcurr @ mat
+                        mat = egoadj2egocurr @ mat
                         lidar2img_aug['rot'] = mat[:3, :3]
                         lidar2img_aug['tran'] = mat[:3, 3]
                         lidar2cam_r = lidar2img_aug['lidar2cam_r'] = np.linalg.inv(lidar2img_aug['rot'])
@@ -452,18 +489,18 @@ class NuScenesDataset(Custom3DDataset):
                     lidar2img_extra=lidar2img_extras,
                     intrinsic=intrinsics,
                     ego2cam=ego2cam_rts,
-                    lidar2ego=lidar2ego
+                    version=self.version[version]
                 )
             )
             if self.sequential:
                 input_dict.update(dict(info=info))
 
         if True:
-            annos = self.get_ann_info(index)
+            annos = self.get_ann_info(index, lidar2ego)
             input_dict['ann_info'] = annos
             if self.sequential:
                 bbox = input_dict['ann_info']['gt_bboxes_3d'].tensor
-                if 'abs' in self.speed_mode:
+                if 'abs' in self.speed_mode and version=='nusc':
                     bbox[:, 7:7+2] = bbox[:, 7:7+2] + torch.from_numpy(info['velo']).view(1, 2)
                 if 'dis' in self.speed_mode:
                     assert self.test_time_id is not None
@@ -477,7 +514,7 @@ class NuScenesDataset(Custom3DDataset):
 
         return input_dict
 
-    def get_ann_info(self, index):
+    def get_ann_info(self, index, lidar2ego):
         """Get annotation info according to the given index.
 
         Args:
@@ -492,11 +529,17 @@ class NuScenesDataset(Custom3DDataset):
                 - gt_names (list[str]): Class names of ground truths.
         """
         info = self.data_infos[index]
-        # filter out bbox containing no points
-        if self.use_valid_flag:
-            mask = info['valid_flag']
+        version = info['version']
+
+        # [x, y, z, l, w, h, yaw]
+        if len(info['gt_boxes']) != 0:
+            info['gt_boxes'][:, 6] = -info['gt_boxes'][:, 6]
         else:
-            mask = info['num_lidar_pts'] > 0
+            info['gt_boxes'] = info['gt_boxes'].reshape(0, 9)
+
+        if version == "nusc":
+            info['gt_boxes'] = transform_boxes_lidar_to_ego(info['gt_boxes'], lidar2ego)
+        
         gt_bboxes_3d = info['gt_boxes']
         gt_names_3d = info['gt_names']
         gt_labels_3d = []
@@ -507,7 +550,7 @@ class NuScenesDataset(Custom3DDataset):
                 gt_labels_3d.append(-1)
         gt_labels_3d = np.array(gt_labels_3d)
 
-        if self.with_velocity:
+        if self.with_velocity and version=='nusc':
             gt_velocity = info['gt_velocity']
             nan_mask = np.isnan(gt_velocity[:, 0])
             gt_velocity[nan_mask] = [0.0, 0.0]
@@ -922,3 +965,42 @@ def lidar_nusc_box_to_global(info,
         box.translate(np.array(info['ego2global_translation']))
         box_list.append(box)
     return box_list
+
+def transform_boxes_lidar_to_ego(boxes_lidar, lidar2ego):
+    """
+    将 Ego 系下的 GT Boxes 转换到 Lidar 系下
+    参数:
+        boxes_lidar: np.ndarray, 形状 [N, 7], 包含 [x, y, z, l, w, h, yaw]
+        lidar2ego: np.ndarray, 形状 [4, 4], 变换矩阵 (T_lidar_ego)
+    返回:
+        boxes_lidar: np.ndarray, 形状 [N, 7]
+    """
+    # 1. 提取中心点 (x, y, z)
+    xyz_ego = boxes_lidar[:, :3]
+    
+    # 构造齐次坐标 [N, 4] -> [x, y, z, 1]
+    ones = np.ones((xyz_ego.shape[0], 1))
+    xyz_homo = np.hstack([xyz_ego, ones])
+    
+    # 应用 4x4 变换矩阵: [N, 4] @ [4, 4].T -> [N, 4]
+    # 或者直接使用 np.dot(lidar2ego, xyz_homo.T).T
+    xyz_lidar = (xyz_homo @ lidar2ego.T)[:, :3]
+    
+    # 2. 尺寸 (l, w, h) 在刚体变换下保持不变
+    lwh = boxes_lidar[:, 3:6]
+    
+    # 3. 转换 Yaw 角
+    # 从旋转矩阵 R 中提取绕 Z 轴的旋转分量 delta_yaw
+    # R = lidar2ego[:3, :3]
+    # 在标准右手法则下，delta_yaw = atan2(R[1,0], R[0,0])
+    delta_yaw = np.arctan2(lidar2ego[1, 0], lidar2ego[0, 0])
+    
+    yaw_lidar = boxes_lidar[:, 6:7] + delta_yaw
+    
+    # 4. 角度归一化到 [-pi, pi]
+    yaw_lidar = (yaw_lidar + np.pi) % (2 * np.pi) - np.pi
+    
+    # 5. 拼接结果
+    boxes_ego = np.concatenate([xyz_lidar, lwh, yaw_lidar], axis=1)
+    
+    return boxes_ego

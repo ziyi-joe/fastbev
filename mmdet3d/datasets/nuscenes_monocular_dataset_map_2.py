@@ -25,10 +25,10 @@ class NuScenesMultiView_Map_Dataset2(NuScenesMultiViewDataset):
                  **kwargs):
         super().__init__(**kwargs)
 
-        if local_mode:
-            self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
-        else:
-            self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
+        # if local_mode:
+        #     self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
+        # else:
+        #     self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=True)
         # self.scene2map = get_scene2map(self.nusc)
         # self.maps = get_nusc_maps()
         # box 2d
@@ -76,7 +76,7 @@ class NuScenesMultiView_Map_Dataset2(NuScenesMultiViewDataset):
             # get bbox2d for camera
             if self.with_box2d:
                 camera_types = [
-                    'CAM_FRONT', 'CAM_FRONT_LEFT']
+                    'FRONT', 'FRONT_30']
                 info = self.data_infos[index]
                 gt_bboxes_mv, gt_labels_mv, gt_bboxes_ignore_mv = [], [], []
                 for cam in camera_types:
