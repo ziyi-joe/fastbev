@@ -4,6 +4,7 @@ import mmcv
 import os
 import torch
 import warnings
+import yaml
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -34,9 +35,32 @@ import copy
 import numpy as np
 from collections import deque
 from pyquaternion import Quaternion
-from infer_diffential import cal_cam_output
+from infer_differential import cal_cam_output, get_system_aeb_level
 from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
 
+def fit_line_segment_pca(points):
+    # 1. PCA 拟合直线方向
+    pca = PCA(n_components=1)
+    pca.fit(points)
+    
+    # 2. 得到中心点和方向向量
+    center = pca.mean_
+    direction = pca.components_[0]
+    
+    # 3. 将所有点投影到该方向上
+    # 投影公式：p' = center + ( (p - center) · direction ) * direction
+    projections = []
+    for p in points:
+        dist = np.dot(p - center, direction)
+        projections.append(dist)
+    
+    # 4. 找到投影的最远两端
+    min_dist, max_dist = min(projections), max(projections)
+    endpoint1 = center + min_dist * direction
+    endpoint2 = center + max_dist * direction
+    
+    return np.array([endpoint1, endpoint2])
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -118,7 +142,9 @@ def parse_args():
     parser.add_argument('--debug_num', type=int, default=50)
     
     parser.add_argument('--extrinsic-noise', '-n', type=float, default=0)
-    
+    parser.add_argument('--infer-config', default='tools/infer_config.yaml',
+                        help='path to inference hyperparameter config yaml')
+
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -250,9 +276,11 @@ def get_ego_transforms(ego_vels, ego_yawrates, dt=0.5):
     return [np.eye(4), T_1_to_curr, T_2_to_curr, T_3_to_curr]
 
 
-def project_2d_to_3d(mlvl_feat, img_metas, stride):
-    n_voxels = [200, 128, 4]
-    voxel_size = [0.5, 0.4, 1.5]
+def project_2d_to_3d(mlvl_feat, img_metas, stride, voxel_size=None, n_voxels=None):
+    if n_voxels is None:
+        n_voxels = [200, 128, 4]
+    if voxel_size is None:
+        voxel_size = [0.5, 0.4, 1.5]
     mlvl_volumes = []
     
     # [bs*seq*nv, c, h, w] -> [bs, seq*nv, c, h, w]
@@ -291,7 +319,8 @@ def project_2d_to_3d(mlvl_feat, img_metas, stride):
     return volume_list
 
 
-def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, -25.6)):
+def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, -25.6),
+                     cls_thr=None, min_pixel=3, dbscan_eps=0.45, dbscan_min_samples=5):
     """
     车道线后处理：从 bev_map 和 instance_map 提取向量化车道线
 
@@ -320,11 +349,13 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
     # 类别映射
     category_map = {0: 'divider', 1: 'crossing'}
 
+    if cls_thr is None:
+        cls_thr = [0.5, 0.45]
+
     # 存储所有车道线向量
     lane_vectors = []
 
     # 对每个类别分别处理
-    cls_thr = [0.55, 0.5, 0.42]
     for class_id, category_name in category_map.items():
         # 获取当前类别的mask
         # class_mask = (semantic_map == class_id)  # [200, 128]
@@ -335,7 +366,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
 
         # 获取该类别像素的instance embedding
         ys, xs = np.where(class_mask)
-        if len(xs) < 3:  # 像素太少，跳过
+        if len(xs) < min_pixel:  # 像素太少，跳过
             continue
 
         # 提取这些像素的embedding [N, 16]
@@ -343,7 +374,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
 
         # 使用DBSCAN聚类实例
         # 同一instance的像素embedding距离较近
-        clustering = DBSCAN(eps=2.0, min_samples=5, metric='euclidean')
+        clustering = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric='euclidean')
         labels = clustering.fit_predict(embeddings)
 
         # 对每个实例进行处理
@@ -355,7 +386,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
             inst_ys = ys[inst_mask]
             inst_xs = xs[inst_mask]
 
-            if len(inst_xs) < 3:  # 像素太少
+            if len(inst_xs) < min_pixel:  # 像素太少
                 continue
 
             # 将像素坐标转换为自车坐标系
@@ -365,16 +396,19 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
 
             # 方法1: 使用拟合+排序来得到有序点集
             points = pixel_to_ego_coords(inst_xs, inst_ys, voxel_size, pc_range)
+            if len(points) < 5:
+                continue
+            if class_id == 0:
+                ordered_points = fit_line_segment_pca(points)
+            else:
+                # 对点进行排序，使其成为有序向量
+                ordered_points = order_points_to_vector(points)
 
-            # 对点进行排序，使其成为有序向量
-            ordered_points = order_points_to_vector(points)
-
-            if len(ordered_points) >= 3:
-                lane_vectors.append({
-                    'category': category_name,
-                    'class_id': class_id,
-                    'points': ordered_points
-                })
+            lane_vectors.append({
+                'category': category_name,
+                'class_id': class_id,
+                'points': ordered_points
+            })
 
     return lane_vectors
 
@@ -531,15 +565,41 @@ def main():
 
     model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
 
-    onnx_2d = ort.InferenceSession("work_dirs/onnx/simplified_export_2d_model.onnx")
-    onnx_3d = ort.InferenceSession("work_dirs/onnx/simplified_export_3d_model.onnx")
-    
+    with open(args.infer_config, 'r') as f:
+        infer_cfg = yaml.safe_load(f)
+    g_cfg = infer_cfg['global']
+    det_cfg = infer_cfg['det_3d']
+    lane_cfg = infer_cfg['lane_postprocess']
+
+    voxel_size_2d = g_cfg['voxel_size']          # [dx, dy]
+    pc_range = g_cfg['pc_range']                  # [x_min, y_min]
+    DT = g_cfg['DT']
+    track_len = det_cfg['track_len']
+    det_thresh = det_cfg['det_thresh']
+    max_connect_dist = det_cfg['max_connect_dist']
+    front_thresh = det_cfg['front_thresh']
+    ttc_w1 = det_cfg['ttc_w1']
+    ttc_w2 = det_cfg['ttc_w2']
+    ttc_b1 = det_cfg['ttc_b1']
+    ttc_b2 = det_cfg['ttc_b2']
+    ttc_b3 = det_cfg['ttc_b3']
+    lateral_zone_y = det_cfg['lateral_zone_y']
+    lateral_vel_thresh = det_cfg['lateral_vel_thresh']
+    lateral_threat_level = det_cfg['lateral_threat_level']
+    cls_thr = lane_cfg['cls_thr']
+    min_pixel = lane_cfg['min_pixel']
+    dbscan_eps, dbscan_min_samples = lane_cfg['DBSCAN_param']
+
+    # n_voxels的xy维度由pc_range和voxel_size隐式确定，z维度固定为4
+    n_voxels = [200, 128, 4]
+    voxel_size_3d = voxel_size_2d + [1.5]        # 补充z方向体素尺寸
+
+    onnx_2d = ort.InferenceSession("/data_nas/ziyi/onnx/0421_2d_model.onnx")
+    onnx_3d = ort.InferenceSession("/data_nas/ziyi/onnx/0421_3d_model.onnx")
+
     bbox_infos = deque([{}, {}, {}])
     ego_vels = deque([])
     ego_yawrates = deque([])
-    DT = 0.5
-    track_len = 3
-    det_thresh = 0.3
     ego_last_heading = 0.0
     
     save_path = args.save_path
@@ -560,7 +620,7 @@ def main():
         img_metas = data['img_metas'].data[0][0]
         # 通过ego的速度和yaw rate计算历史ego到当前ego的转换矩阵
         # 前两帧没有历史信息，需要跳过
-        if i > 3:
+        if i > track_len:
             histego2curego_T = get_ego_transforms(ego_vels, ego_yawrates)
             intrinsic0 = data['intrinsic'][0].cpu().numpy()[0].astype(np.float32)
             intrinsic1 = data['intrinsic'][1].cpu().numpy()[0].astype(np.float32)
@@ -589,7 +649,8 @@ def main():
         feat_2d = torch.cat(feat_2d, dim=0) # [8, 64, 64, 176]
         # 2d -> 3d
         stride = math.ceil(img.shape[-1] / feat_2d.shape[-1])
-        bev_feat = project_2d_to_3d(feat_2d, img_metas, stride)
+        bev_feat = project_2d_to_3d(feat_2d, img_metas, stride,
+                                    voxel_size=voxel_size_3d, n_voxels=n_voxels)
         # 二阶段
         input_dict = {
             'bev_feat0': bev_feat[0].detach().cpu().numpy(),
@@ -602,7 +663,7 @@ def main():
         bbox_pred = torch.from_numpy(output[1]).cuda()
         cls_score = torch.from_numpy(output[2]).cuda()
         bev_map = sigmoid(output[3][0])
-        instance_map = sigmoid(output[4][0])
+        instance_map = output[4][0]
         # 解算box
         bbox_list = model.bbox_head.get_bboxes([cls_score], [bbox_pred], [dir_cls_preds], [img_metas])
         bbox_results = [
@@ -620,17 +681,31 @@ def main():
         # 至少3帧后，开始输出
         if i <= track_len:
             continue
-        cam_output = cal_cam_output(list(bbox_infos), 
-                                    list(ego_vels), 
-                                    list(ego_yawrates), 
+        cam_output = cal_cam_output(list(bbox_infos),
+                                    list(ego_vels),
+                                    list(ego_yawrates),
                                     det_thresh=det_thresh,
                                     track_len=track_len,
                                     DT=DT,
-                                    max_connect_dist=3.0,
-                                    main_obstacle_thresh=3.0,
-                                    dangerous_thresh=1.0)
+                                    max_connect_dist=max_connect_dist,
+                                    front_thresh=front_thresh,
+                                    ttc_w1=ttc_w1,
+                                    ttc_w2=ttc_w2,
+                                    ttc_b1=ttc_b1,
+                                    ttc_b2=ttc_b2,
+                                    ttc_b3=ttc_b3,
+                                    lateral_zone_y=lateral_zone_y,
+                                    lateral_vel_thresh=lateral_vel_thresh,
+                                    lateral_threat_level=lateral_threat_level)
+        cam_output['System_AEB_level'] = get_system_aeb_level(cam_output)
         # 车道线后处理
-        lane_vectors = lane_postprocess(bev_map, instance_map)
+        lane_vectors = lane_postprocess(bev_map, instance_map,
+                                        voxel_size=tuple(voxel_size_2d),
+                                        pc_range=tuple(pc_range),
+                                        cls_thr=cls_thr,
+                                        min_pixel=min_pixel,
+                                        dbscan_eps=dbscan_eps,
+                                        dbscan_min_samples=int(dbscan_min_samples))
         ego2cam = data['ego2cam'][0]
         # 因为画在原图上，此处要用resize前的内参
         real_intr = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
@@ -640,24 +715,42 @@ def main():
         }
         # 投影到前视图上可视化
         for vector in lane_vectors:
+            if vector['category'] == 'curb':
+                continue
             points = vector['points']
             points_ego_homogeneous = \
-                np.concatenate([points, np.zeros((points.shape[0], 1), dtype=points.dtype),
+                np.concatenate([points, 0.0 * np.ones((points.shape[0], 1), dtype=points.dtype),
                                 np.ones((points.shape[0], 1), dtype=points.dtype)
                                 ], axis=1)
-            points_camera = (points_ego_homogeneous @ ego2cam.T)[:, :3]
-            points_camera = points_camera / points_camera[:, 2:3]
+            points_camera_3d = (points_ego_homogeneous @ ego2cam.T)[:, :3]
+            # 过滤掉在相机后方的点（z <= 0）
+            depths = points_camera_3d[:, 2]
+            if np.any(depths <= 0):
+                continue
+            points_camera = points_camera_3d / depths[:, None]
             points_img = (points_camera @ real_intr.T)[:, :2]
-            for point in points_img:
-                cv2.circle(front_img, point.astype(np.int64), radius=5, color=bev_clr[vector['category']], thickness=-1)
+            h, w = front_img.shape[:2]
+            if vector['category'] == 'divider':
+                p0 = points_img[0].astype(np.int64)
+                p1 = points_img[1].astype(np.int64)
+                ret, p0c, p1c = cv2.clipLine((0, 0, w, h), tuple(p0), tuple(p1))
+                if ret:
+                    cv2.line(front_img, p0c, p1c, color=bev_clr[vector['category']], thickness=5)
+            else:
+                for point in points_img:
+                    pt = point.astype(np.int64)
+                    if 0 <= pt[0] < w and 0 <= pt[1] < h:
+                        cv2.circle(front_img, tuple(pt), radius=5, color=bev_clr[vector['category']], thickness=-1)
         
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)
         
-        
-        show_imgs = det_post_process(bbox_results[0], front_img, ego2cam, real_intr, None, ego_cur_vel, cam_output)
-        cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs[0])
+        if len(bbox_results[0]['boxes_3d'].tensor) > 0:
+            show_imgs = det_post_process(bbox_results[0], front_img, ego2cam, real_intr, None, ego_cur_vel, cam_output)[0]
+        else:
+            show_imgs = front_img
+        cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs)
         print(f"img save to {save_path}/{i}.jpg")
     
 

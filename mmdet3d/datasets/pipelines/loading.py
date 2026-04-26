@@ -1045,6 +1045,7 @@ class PreparePnPInput(object):
         self.type2int = {
             'road_line':0,
             'crosswalk': 1,
+            'lane_divider': 0,
         }
         # print("ready for pnp input")
         # if local_mode:
@@ -1110,7 +1111,7 @@ class PreparePnPInput(object):
 
 
     def __call__(self, result):
-        if result['version'] == 1 or result['version'] == 0:
+        if result['version'] in [0, 1, 3, 4]:
             result['bev_map'] = np.zeros((2, 200, 128), dtype=np.float32)
             result['instance_map'] = np.zeros((1, 200, 128), dtype=np.float32)
             return result

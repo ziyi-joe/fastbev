@@ -11,6 +11,85 @@ from pyquaternion import Quaternion
 
 from mmdet.datasets import DATASETS
 from ..core import show_result
+
+
+class _LmdbInfoList:
+    """Lazy-loading list backed by an LMDB store of pickled info dicts.
+
+    The LMDB env is opened on first access so the object is fork-safe:
+    worker processes each open their own file descriptor after fork.
+    """
+
+    def __init__(self, lmdb_path, indices=None):
+        self._path = lmdb_path
+        self._env = None
+        self._indices = indices  # list[int] or None (None = full range)
+
+    def _open(self):
+        import lmdb
+        if self._env is None:
+            self._env = lmdb.open(
+                self._path, readonly=True, lock=False,
+                readahead=False, meminit=False)
+
+    def __len__(self):
+        if self._indices is not None:
+            return len(self._indices)
+        self._open()
+        with self._env.begin() as txn:
+            return int(txn.get(b'__len__').decode())
+
+    def __getitem__(self, idx):
+        import pickle
+        if isinstance(idx, slice):
+            total = len(self)
+            indices = list(range(total))[idx]
+            real_indices = (
+                [self._indices[i] for i in indices]
+                if self._indices is not None else indices)
+            return _LmdbInfoList(self._path, real_indices)
+        if self._indices is not None:
+            idx = self._indices[idx]
+        self._open()
+        with self._env.begin() as txn:
+            return pickle.loads(txn.get(str(idx).encode()))
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+class _ConcatLmdbInfoList:
+    """Lazy concatenation of multiple _LmdbInfoList (or list) objects."""
+
+    def __init__(self, wrappers):
+        self._wrappers = wrappers
+        self._lengths = [len(w) for w in wrappers]
+        self._total = sum(self._lengths)
+        # cumulative offsets for index lookup
+        self._offsets = []
+        acc = 0
+        for l in self._lengths:
+            self._offsets.append(acc)
+            acc += l
+
+    def __len__(self):
+        return self._total
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            indices = list(range(self._total))[idx]
+            return [self[i] for i in indices]
+        if idx < 0:
+            idx += self._total
+        # binary search for which wrapper owns this index
+        import bisect
+        wi = bisect.bisect_right(self._offsets, idx) - 1
+        return self._wrappers[wi][idx - self._offsets[wi]]
+
+    def __iter__(self):
+        for w in self._wrappers:
+            yield from w
+
+
 from ..core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
 from .custom_3d import Custom3DDataset
 from .pipelines import Compose
@@ -183,12 +262,16 @@ class NuScenesDataset(Custom3DDataset):
         self.vis_cam = {
             "nusc": "FRONT",
             "beijing": "FRONT",
-            "waymo": "FRONT"
+            "waymo": "FRONT",
+            "qirui": "FRONT",
+            "nv": "FRONT"
         }
         self.version = {
             "nusc": 0,
             "beijing": 1,
-            "waymo": 2
+            "waymo": 2,
+            "qirui": 3,
+            "nv": 4,
         }
 
 
@@ -216,21 +299,50 @@ class NuScenesDataset(Custom3DDataset):
                 cat_ids.append(self.cat2id[name])
         return cat_ids
 
+    def _load_lmdb(self, lmdb_path):
+        wrapper = _LmdbInfoList(lmdb_path)
+        if self.load_interval > 1:
+            wrapper = wrapper[::self.load_interval]
+        return wrapper
+
     def load_annotations(self, ann_file):
         """Load annotations from ann_file.
 
         Args:
-            ann_file (str): Path of the annotation file.
+            ann_file (str or list[str]): Path(s) of the annotation file(s).
+                If a list is given, infos from all files are merged.
+                Paths ending with '.lmdb' are loaded lazily via LMDB.
 
         Returns:
             list[dict]: List of annotations sorted by timestamps.
         """
-        data = mmcv.load(ann_file)
-        if not self.test_mode:
-            data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        if isinstance(ann_file, (list, tuple)):
+            wrappers = []
+            for f in ann_file:
+                if f.endswith('.lmdb'):
+                    wrappers.append(self._load_lmdb(f))
+                else:
+                    data = mmcv.load(f)
+                    wrappers.append(data['infos'])
+            if not self.test_mode:
+                # sort by timestamp requires materialising all infos once
+                all_infos = list(_ConcatLmdbInfoList(wrappers))
+                all_infos = sorted(all_infos, key=lambda e: e['timestamp'])
+                return all_infos[::self.load_interval]
+            concat = _ConcatLmdbInfoList(wrappers)
+            if self.load_interval > 1:
+                indices = list(range(0, len(concat), self.load_interval))
+                return [concat[i] for i in indices]
+            return concat
         else:
+            if ann_file.endswith('.lmdb'):
+                return self._load_lmdb(ann_file)
+            data = mmcv.load(ann_file)
             data_infos = data['infos']
-        data_infos = data_infos[::self.load_interval]
+            if not self.test_mode:
+                data_infos = list(
+                    sorted(data_infos, key=lambda e: e['timestamp']))
+            data_infos = data_infos[::self.load_interval]
         # self.metadata = data['metadata']
         # self.version = self.metadata['version']
         return data_infos
@@ -278,15 +390,14 @@ class NuScenesDataset(Custom3DDataset):
             timestamp=info['timestamp'] / 1e6,
             ego_vel=info['velo'],
             vis_info=vis_info,
-            lanes=info['lanes'] if version == "waymo" else None,
-            lane_types=info['lane_types'] if version == "waymo" else None,
+            lanes=info['lanes'] if 'lanes' in info else None,
+            lane_types=info['lane_types'] if 'lanes' in info else None,
         )
         if self.modality['use_camera']:
             image_paths = []
             lidar2img_rts = []
             ego2cam_rts = []
-            lidar2img_augs = []
-            lidar2img_extras = []
+            ego2img_augs = []
             intrinsics = []
             kws = [
                 'sensor2ego_translation',
@@ -300,9 +411,6 @@ class NuScenesDataset(Custom3DDataset):
             for cam_type, cam_info in info['cams'].items():
                 image_paths.append(cam_info['data_path'])
 
-                # keep original rts
-                lidar2img_extra = {kw: cam_info[kw] for kw in kws}
-                lidar2img_extras.append(lidar2img_extra)
 
                 # obtain lidar to image transformation matrix
                 intrinsic = cam_info['cam_intrinsic']
@@ -315,13 +423,9 @@ class NuScenesDataset(Custom3DDataset):
                 lidar2cam_rt[3, :3] = -lidar2cam_t
 
                 # keep aug rts
-                if version == "beijing" or version == "waymo":
-                    rot = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
-                    tran = cam_info['sensor2ego_translation']
-                elif version == "nusc":
-                    rot = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
-                    tran = cam_info['sensor2ego_translation']
-                lidar2img_aug = {
+                rot = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
+                tran = cam_info['sensor2ego_translation']
+                ego2img_aug = {
                     'intrin': cam_info['cam_intrinsic'],
                     'rot': rot,
                     'tran': tran,
@@ -331,7 +435,7 @@ class NuScenesDataset(Custom3DDataset):
                 lidar2ego = np.eye(4, dtype=np.float32)
                 lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
                 lidar2ego[:3, 3] = info['lidar2ego_translation']
-                lidar2img_augs.append(lidar2img_aug)
+                ego2img_augs.append(ego2img_aug)
 
                 viewpad = np.eye(4)
                 viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
@@ -355,13 +459,12 @@ class NuScenesDataset(Custom3DDataset):
                     # 使用深拷贝，避免浅拷贝导致 RandomFlip3D 修改时影响所有帧
                     image_paths = copy.deepcopy(image_paths) * self.n_times
                     lidar2img_rts = [copy.deepcopy(x) for _ in range(self.n_times) for x in lidar2img_rts]
-                    lidar2img_augs = [copy.deepcopy(x) for _ in range(self.n_times) for x in lidar2img_augs]
-                    lidar2img_extras = copy.deepcopy(lidar2img_extras) * self.n_times
+                    ego2img_augs = [copy.deepcopy(x) for _ in range(self.n_times) for x in ego2img_augs]
                     ego2cam_rts = copy.deepcopy(ego2cam_rts) * self.n_times
                 for time_id in range(1, self.n_times):
                     if version == "beijing" or version=="waymo":
                         break
-                    if info['prev'] is None or info['next'] is None:
+                    if info['prev'] is None or len(info['prev'])==0:
                         adjacent = 'prev' if info['next'] is None else 'next'
                     else:
                         if self.prev_only or self.next_only: # 训练的时候是prev_only
@@ -427,11 +530,7 @@ class NuScenesDataset(Custom3DDataset):
                     egoadj2global = np.eye(4, dtype=np.float32)
                     egoadj2global[:3, :3] = Quaternion(info_adj['ego2global_rotation']).rotation_matrix
                     egoadj2global[:3, 3] = info_adj['ego2global_translation']
-                    # lidar2ego = np.eye(4, dtype=np.float32)
-                    # lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
-                    # lidar2ego[:3, 3] = info['lidar2ego_translation']
-                    lidaradj2lidarcurr = np.linalg.inv(lidar2ego) @ np.linalg.inv(egocurr2global) \
-                        @ egoadj2global @ lidar2ego
+                    # ego上一帧到当前帧的变换
                     egoadj2egocurr = np.linalg.inv(egocurr2global) @ egoadj2global
 
                     kws_adj = [
@@ -441,22 +540,22 @@ class NuScenesDataset(Custom3DDataset):
                     for cam_id, (cam_type, cam_info) in enumerate(info_adj['cams'].items()):
                         image_paths.append(cam_info['data_path'])
 
-                        lidar2img_aug = lidar2img_augs[cam_id].copy()
+                        ego2img_aug = ego2img_augs[cam_id].copy()
                         mat = np.eye(4, dtype=np.float32)
-                        mat[:3, :3] = lidar2img_aug['rot']
-                        mat[:3, 3] = lidar2img_aug['tran']
+                        mat[:3, :3] = ego2img_aug['rot']
+                        mat[:3, 3] = ego2img_aug['tran']
                         # mat = lidaradj2lidarcurr @ mat
                         mat = egoadj2egocurr @ mat
-                        lidar2img_aug['rot'] = mat[:3, :3]
-                        lidar2img_aug['tran'] = mat[:3, 3]
-                        lidar2cam_r = lidar2img_aug['lidar2cam_r'] = np.linalg.inv(lidar2img_aug['rot'])
-                        lidar2cam_t = lidar2img_aug['lidar2cam_t'] = lidar2img_aug['tran'] @ lidar2img_aug['lidar2cam_r'].T
+                        ego2img_aug['rot'] = mat[:3, :3]
+                        ego2img_aug['tran'] = mat[:3, 3]
+                        lidar2cam_r = ego2img_aug['lidar2cam_r'] = np.linalg.inv(ego2img_aug['rot'])
+                        lidar2cam_t = ego2img_aug['lidar2cam_t'] = ego2img_aug['tran'] @ ego2img_aug['lidar2cam_r'].T
 
                         # keep aug rts
-                        lidar2img_augs.append(lidar2img_aug)
+                        ego2img_augs.append(ego2img_aug)
 
                         # obtain lidar to image transformation matrix
-                        intrin = lidar2img_aug['intrin']
+                        intrin = ego2img_aug['intrin']
                         lidar2cam_rt = np.eye(4)
                         lidar2cam_rt[:3, :3] = lidar2cam_r.T
                         lidar2cam_rt[3, :3] = -lidar2cam_t
@@ -467,9 +566,6 @@ class NuScenesDataset(Custom3DDataset):
                         ego2cam_rt = lidar2cam_rt.T @ np.linalg.inv(lidar2ego)
                         ego2cam_rts.append(ego2cam_rt)
 
-                        # keep original rts
-                        lidar2img_extra = {kw: info_adj[kw] for kw in kws_adj}
-                        lidar2img_extras.append(lidar2img_extra)
 
                 if self.verbose:
                     time_list = [0.0]
@@ -485,8 +581,7 @@ class NuScenesDataset(Custom3DDataset):
                 dict(
                     img_filename=image_paths,
                     lidar2img=lidar2img_rts,
-                    lidar2img_aug=lidar2img_augs,
-                    lidar2img_extra=lidar2img_extras,
+                    lidar2img_aug=ego2img_augs,
                     intrinsic=intrinsics,
                     ego2cam=ego2cam_rts,
                     version=self.version[version]
@@ -537,7 +632,7 @@ class NuScenesDataset(Custom3DDataset):
         else:
             info['gt_boxes'] = info['gt_boxes'].reshape(0, 9)
 
-        if version == "nusc":
+        if version == "nusc" or version == "qirui" or version == "nv":
             info['gt_boxes'] = transform_boxes_lidar_to_ego(info['gt_boxes'], lidar2ego)
         
         gt_bboxes_3d = info['gt_boxes']
@@ -550,7 +645,10 @@ class NuScenesDataset(Custom3DDataset):
                 gt_labels_3d.append(-1)
         gt_labels_3d = np.array(gt_labels_3d)
 
-        if self.with_velocity and version=='nusc':
+        if version == 'qirui' or version == "nv":
+            gt_velocity = np.zeros([gt_bboxes_3d.shape[0], 2])
+            gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
+        elif version == "nusc":
             gt_velocity = info['gt_velocity']
             nan_mask = np.isnan(gt_velocity[:, 0])
             gt_velocity[nan_mask] = [0.0, 0.0]

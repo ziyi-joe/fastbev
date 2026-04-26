@@ -321,8 +321,10 @@ def main():
     all_gts = []
 
     for i, data in tqdm(enumerate(data_loader)):
+        if i > 200:
+            break
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            result, bev_map, instance_map = model(return_loss=False, rescale=True, **data)
             
             # 收集预测
             all_preds.append({

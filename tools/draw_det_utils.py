@@ -317,7 +317,7 @@ def det_post_process(pts_bbox, img, lidar2camera, intrinsic, info, ego_cur_vel=0
                         p1_img, p2_img, img_width, img_height)
 
                     if should_draw:
-                        cv2.line(img, tuple(p1_img), tuple(p2_img), color=color, thickness=2)
+                        cv2.line(img, tuple(p1_img), tuple(p2_img), color=color, thickness=4)
 
         imgs.append(img)
     return imgs

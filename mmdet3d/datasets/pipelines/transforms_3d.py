@@ -465,7 +465,10 @@ class ObjectRangeFilter(object):
         # 只保留前向45度范围内的
         import torch
         bbox_angle = torch.atan2(gt_bboxes_3d.center[:, 1], gt_bboxes_3d.center[:, 0])
-        fov_mask = abs(bbox_angle) < 0.4
+        if input_dict['version'] in [3, 4]:
+            fov_mask = abs(bbox_angle) < 99.0
+        else:
+            fov_mask = abs(bbox_angle) < 0.4
         front_mask = gt_bboxes_3d.center[:, 1] > 2.0
         mask = mask * fov_mask #* front_mask
         gt_bboxes_3d = gt_bboxes_3d[mask]

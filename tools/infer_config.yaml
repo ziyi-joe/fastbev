@@ -1,0 +1,37 @@
+# FastBEV 推理超参数配置
+
+global:
+  # BEV体素尺寸 (x方向分辨率m, y方向分辨率m)
+  voxel_size: [0.5, 0.4]
+  # 点云范围起点 (x_min m, y_min m)
+  pc_range: [0.0, -25.6]
+  # 相邻两帧时间间隔 (秒)
+  DT: 0.5
+
+det_3d:
+  # tracking帧数
+  track_len: 3
+  # 检测置信度阈值
+  det_thresh: 0.3
+  # 前后帧目标关联最大距离 (米)
+  max_connect_dist: 3.0
+  # 纵向TTC走廊半宽 (米), 标准车道半宽
+  front_thresh: 3.5
+  # 5档AEB TTC阈值 (秒)
+  ttc_w1: 4.0                 # W1: 软提醒
+  ttc_w2: 3.0                 # W2: 强提醒
+  ttc_b1: 2.0                 # B1: 部分刹车 ~30%
+  ttc_b2: 1.5                 # B2: 中度刹车 ~50%
+  ttc_b3: 1.0                 # B3: 紧急全刹
+  # 横向cut-in检测参数
+  lateral_zone_y: 5.0         # 横向监控半宽 (米)
+  lateral_vel_thresh: 1.5     # 触发cut-in的横向相对速度阈值 (m/s)
+  lateral_threat_level: 1     # cut-in威胁对应的AEB档位 (1=W1)
+
+lane_postprocess:
+  # 三类lane元素的置信度阈值 [divider, crossing, curb]
+  cls_thr: [0.5, 0.45, 0.5]
+  # 过滤噪点的最小像素数
+  min_pixel: 3
+  # DBSCAN聚类参数 [eps, min_samples]
+  DBSCAN_param: [0.45, 5]

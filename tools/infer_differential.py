@@ -10,7 +10,7 @@ def get_motion_transform(ego_v, ego_yawrate, dt):
     dtheta = ego_yawrate * dt
     transform = np.array([
         [np.cos(dtheta),  np.sin(dtheta), -dx * np.cos(dtheta)],
-        [-np.sin(dtheta), np.cos(dtheta),  dx * np.sin(dtheta)], 
+        [-np.sin(dtheta), np.cos(dtheta),  dx * np.sin(dtheta)],
         [0, 0, 1]
     ])
     return transform
@@ -24,7 +24,7 @@ def transform_points(points, transform_matrix):
     """
     if len(points) == 0:
         return points
-    points_h = np.c_[points, np.ones(len(points))] 
+    points_h = np.c_[points, np.ones(len(points))]
     # (3, 3) @ (3, N) -> (3, N) -> .T -> (N, 3)
     points_curr_h = (transform_matrix @ points_h.T).T
     return points_curr_h[:, :2]
@@ -71,15 +71,28 @@ def greedy_linear_assignment(cost_matrix):
     return np.array(row_ind), np.array(col_ind)
 
 
+def get_system_aeb_level(cam_output):
+    """取所有障碍物AEB_level的最大值，返回系统级AEB指令整数0-5。"""
+    levels = cam_output.get('AEB_level', [])
+    return int(max(levels)) if levels else 0
+
+
 def cal_cam_output(bbox_infos,
-                   ego_vels, 
-                   ego_yawrates, 
-                   det_thresh=0.4, 
-                   track_len=3, 
-                   DT=0.1, 
+                   ego_vels,
+                   ego_yawrates,
+                   det_thresh=0.4,
+                   track_len=3,
+                   DT=0.5,
                    max_connect_dist=3.0,
-                   main_obstacle_thresh=3.0,
-                   dangerous_thresh=1.0):
+                   front_thresh=3.5,
+                   ttc_w1=4.0,
+                   ttc_w2=3.0,
+                   ttc_b1=2.0,
+                   ttc_b2=1.5,
+                   ttc_b3=1.0,
+                   lateral_zone_y=5.0,
+                   lateral_vel_thresh=1.5,
+                   lateral_threat_level=1):
     """
     bbox_infos: 最近3帧的 bbox 信息，idx 2 为当前帧
     ego_vels:   最近3帧ego速度信息，idx 2 为当前帧
@@ -87,8 +100,12 @@ def cal_cam_output(bbox_infos,
     track_len: 计算mot速度的时序帧数
     DT: 帧间隔时间
     max_connect_dist: 轨迹匹配的最大距离阈值
-    main_obstacle_thresh: 判定为主目标的阈值
-    dangerous_obstacle_thresh: 判定为危险目标的阈值
+    front_thresh: 纵向TTC计算的横向范围（m）
+    ttc_w1/w2: 预警1/2的TTC阈值（s）
+    ttc_b1/b2/b3: 刹车1/2/3的TTC阈值（s）
+    lateral_zone_y: 横向cut-in监控半宽（m）
+    lateral_vel_thresh: 触发cut-in的横向相对速度阈值（m/s）
+    lateral_threat_level: cut-in威胁对应的AEB档位（1=W1）
     """
     cam_output = {}
     # 1. 数据预处理：提取 XY 和 Box
@@ -148,8 +165,7 @@ def cal_cam_output(bbox_infos,
     cur_t = track_len - 1
     current_frame_dets = frames_dets[cur_t]
     for i in range(len(current_frame_dets['boxes'])):
-        main_obstacle = False
-        dangerous_obstacle = False
+        aeb_level = 0
         bbox = current_frame_dets['boxes'][i]
         type = current_frame_dets['types'][i]
         center = current_frame_dets['xy'][i]
@@ -178,11 +194,11 @@ def cal_cam_output(bbox_infos,
                         p_trans = (T @ np.append(p_trans, 1.0))[:2]
                 compensated_history.append(p_trans)
             compensated_history = np.array(compensated_history)
-            
+
             # 线性拟合计算速度
             times = (np.array([h[0] for h in matched_track['history']]) - cur_t) * DT
             # 当前帧自车速度
-            curr_ego_v = ego_vels[cur_t] 
+            curr_ego_v = ego_vels[cur_t]
             if len(times) > 1:
                 xs = compensated_history[:, 0]
                 ys = compensated_history[:, 1]
@@ -191,22 +207,43 @@ def cal_cam_output(bbox_infos,
                 sum_t = np.sum(times)
                 sum_t_sq = np.sum(times**2)
                 denominator = n * sum_t_sq - sum_t**2
-                assert abs(denominator) > 1e-6
-                # 计算绝对速度
-                abs_vel_x = (n * np.sum(times * xs) - sum_t * np.sum(xs)) / denominator
-                abs_vel_y = (n * np.sum(times * ys) - sum_t * np.sum(ys)) / denominator
-                # 计算相对速度
-                rel_vel_x = abs_vel_x - curr_ego_v
-                rel_vel_y = abs_vel_y  # 自车横向速度忽略不计
+                if abs(denominator) < 1e-6:
+                    # 所有历史点时间戳相同，无法估计速度，保持默认安全值
+                    pass
+                else:
+                    # 计算绝对速度
+                    abs_vel_x = (n * np.sum(times * xs) - sum_t * np.sum(xs)) / denominator
+                    abs_vel_y = (n * np.sum(times * ys) - sum_t * np.sum(ys)) / denominator
+                    # 计算相对速度
+                    rel_vel_x = abs_vel_x - curr_ego_v
+                    rel_vel_y = abs_vel_y  # 自车横向速度忽略不计
 
-                # todo(xu.liu): remove this magic number
-                if bbox[0] > 0 and abs(bbox[1]) < 2.0: 
-                    # TTC = 距离 / 相对接近速度的绝对值
-                    ttc = bbox[0] / (-rel_vel_x)
-                    if ttc < main_obstacle_thresh:
-                        dangerous_obstacle = True
-                    if ttc < dangerous_thresh:
-                        main_obstacle = True
+                    # 纵向TTC与5档AEB分类
+                    if bbox[0] > 0 and abs(bbox[1]) < front_thresh and rel_vel_x < 0:
+                        # TTC = 距离 / 相对接近速度（rel_vel_x < 0 保证TTC为正）
+                        ttc = bbox[0] / (-rel_vel_x)
+                        if ttc <= ttc_b3:
+                            aeb_level = 5   # B3: 紧急全刹
+                        elif ttc <= ttc_b2:
+                            aeb_level = 4   # B2: 中度刹车
+                        elif ttc <= ttc_b1:
+                            aeb_level = 3   # B1: 部分刹车
+                        elif ttc <= ttc_w2:
+                            aeb_level = 2   # W2: 强提醒
+                        elif ttc <= ttc_w1:
+                            aeb_level = 1   # W1: 软提醒
+
+                    # 横向cut-in威胁检测
+                    if (bbox[0] > 0
+                            and abs(bbox[1]) >= front_thresh
+                            and abs(bbox[1]) < lateral_zone_y
+                            and abs(rel_vel_y) > lateral_vel_thresh
+                            and np.sign(rel_vel_y) == -np.sign(bbox[1])):
+                        aeb_level = max(aeb_level, lateral_threat_level)
+
+        # 向后兼容别名
+        main_obstacle = aeb_level >= 1
+        dangerous_obstacle = aeb_level >= 5
 
         obj_data = {
             'Obstacle_Pos_X': float(bbox[0]),
@@ -217,6 +254,7 @@ def cal_cam_output(bbox_infos,
             'Obstacle_Rel_Vel_Y': float(rel_vel_y),
             'Obstacle_TTC': float(ttc),
             'Obstacle_type': type,
+            'AEB_level': int(aeb_level),
             'Main_obstacle': main_obstacle,
             'Dangerous_obstacle': dangerous_obstacle,
         }
@@ -226,9 +264,10 @@ def cal_cam_output(bbox_infos,
             obj_data['Compensated_History'] = compensated_history if 'compensated_history' in locals() else []
         final_output_list.append(obj_data)
     # final_output_list.sort(key=lambda x: x['Obstacle_TTC'])
-    keys = ['Obstacle_Pos_X', 'Obstacle_Pos_Y', 'Obstacle_Rel_Vel_X', 
-            'Obstacle_Rel_Vel_Y', 'Obstacle_type', 'Obstacle_Width', 
-            'Obstacle_Height', 'Obstacle_TTC']
+    keys = ['Obstacle_Pos_X', 'Obstacle_Pos_Y', 'Obstacle_Rel_Vel_X',
+            'Obstacle_Rel_Vel_Y', 'Obstacle_type', 'Obstacle_Width',
+            'Obstacle_Height', 'Obstacle_TTC',
+            'AEB_level', 'Main_obstacle', 'Dangerous_obstacle']
     if vis_mode:
         keys.append('Compensated_History')
     for k in keys:

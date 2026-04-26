@@ -34,7 +34,30 @@ from sklearn.cluster import DBSCAN
 from onnx_infer import get_ego_transforms
 from collections import deque
 from pyquaternion import Quaternion
+from sklearn.decomposition import PCA
 
+def fit_line_segment_pca(points):
+    # 1. PCA 拟合直线方向
+    pca = PCA(n_components=1)
+    pca.fit(points)
+    
+    # 2. 得到中心点和方向向量
+    center = pca.mean_
+    direction = pca.components_[0]
+    
+    # 3. 将所有点投影到该方向上
+    # 投影公式：p' = center + ( (p - center) · direction ) * direction
+    projections = []
+    for p in points:
+        dist = np.dot(p - center, direction)
+        projections.append(dist)
+    
+    # 4. 找到投影的最远两端
+    min_dist, max_dist = min(projections), max(projections)
+    endpoint1 = center + min_dist * direction
+    endpoint2 = center + max_dist * direction
+    
+    return np.array([endpoint1, endpoint2])
 
 def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, -25.6)):
     """
@@ -88,7 +111,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
 
         # 使用DBSCAN聚类实例
         # 同一instance的像素embedding距离较近
-        clustering = DBSCAN(eps=2.0, min_samples=5, metric='euclidean')
+        clustering = DBSCAN(eps=0.6, min_samples=5, metric='euclidean')
         labels = clustering.fit_predict(embeddings)
 
         # 对每个实例进行处理
@@ -110,16 +133,19 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
 
             # 方法1: 使用拟合+排序来得到有序点集
             points = pixel_to_ego_coords(inst_xs, inst_ys, voxel_size, pc_range)
+            if len(points) < 5:
+                continue
+            if class_id == 0:
+                ordered_points = fit_line_segment_pca(points)
+            else:
+                # 对点进行排序，使其成为有序向量
+                ordered_points = order_points_to_vector(points)
 
-            # 对点进行排序，使其成为有序向量
-            ordered_points = order_points_to_vector(points)
-
-            if len(ordered_points) >= 3:
-                lane_vectors.append({
-                    'category': category_name,
-                    'class_id': class_id,
-                    'points': ordered_points
-                })
+            lane_vectors.append({
+                'category': category_name,
+                'class_id': class_id,
+                'points': ordered_points
+            })
 
     return lane_vectors
 
@@ -398,9 +424,7 @@ def main():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     for i, data in tqdm(enumerate(data_loader)):
-        # if i < 1790:
-        #     continue
-        if i > 2290:
+        if i > 195:
             break
         # breakpoint()
         intrinsic0 = data['intrinsic'][0].cpu().numpy()[0].astype(np.float32)
@@ -429,8 +453,7 @@ def main():
         keys = ['Obstacle_Rel_Vel_X', 'Obstacle_Rel_Vel_Y', 'Obstacle_TTC']
         for k in keys:
             cam_output[k] = [item[k] for item in final_output_list]
-        # if i==68:
-        #     breakpoint()
+
         # 可视化gt
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
@@ -467,17 +490,32 @@ def main():
                 np.concatenate([points, 0.0 * np.ones((points.shape[0], 1), dtype=points.dtype),
                                 np.ones((points.shape[0], 1), dtype=points.dtype)
                                 ], axis=1)
-            points_camera = (points_ego_homogeneous @ ego2cam.T)[:, :3]
-            points_camera = points_camera / points_camera[:, 2:3]
+            points_camera_3d = (points_ego_homogeneous @ ego2cam.T)[:, :3]
+            # 过滤掉在相机后方的点（z <= 0）
+            depths = points_camera_3d[:, 2]
+            if np.any(depths <= 0):
+                continue
+            points_camera = points_camera_3d / depths[:, None]
             points_img = (points_camera @ intrinsic0.T)[:, :2]
-            for point in points_img:
-                cv2.circle(front_img, point.astype(np.int64), radius=5, color=bev_clr[vector['category']], thickness=-1)
+            h, w = front_img.shape[:2]
+            if vector['category'] == 'divider':
+                p0 = points_img[0].astype(np.int64)
+                p1 = points_img[1].astype(np.int64)
+                ret, p0c, p1c = cv2.clipLine((0, 0, w, h), tuple(p0), tuple(p1))
+                if ret:
+                    cv2.line(front_img, p0c, p1c, color=bev_clr[vector['category']], thickness=5)
+            else:
+                for point in points_img:
+                    pt = point.astype(np.int64)
+                    if 0 <= pt[0] < w and 0 <= pt[1] < h:
+                        cv2.circle(front_img, tuple(pt), radius=5, color=bev_clr[vector['category']], thickness=-1)
 
         if len(result[0]['boxes_3d'].tensor) > 0:
             show_imgs = det_post_process(result[0], front_img, ego2cam, intrinsic0, vis_info, 0.0, cam_output)[0]
         else:
             show_imgs = front_img
         # cv2.imwrite(f"{save_path}/{i}.jpg", show_imgs)
+        # continue
         
         
         # 可视化bev
@@ -493,6 +531,7 @@ def main():
         bev_vis = np.flip(bev_vis, 0)
         bev_vis = np.flip(bev_vis, 1)
         ax[0].imshow(bev_vis, extent=[-64, 64, 0, 200])
+        show_imgs = cv2.cvtColor(show_imgs, cv2.COLOR_BGR2RGB)
         ax[1].imshow(show_imgs)
 
         # 绘制ego
@@ -520,6 +559,7 @@ def main():
         ax[0].set_xlim(-64,64)
         ax[0].set_ylim(-10,200)
         ax[0].axis('equal')
+        ax[1].grid(False)
 
         fig.savefig(f"{save_path}/{i}.jpg")
         plt.close(fig)

@@ -38,7 +38,6 @@ class NuScenesMultiViewDataset(MultiViewMixin, NuScenesDataset):
                 extrinsic=[tofloat(x) for x in data_info['lidar2img']],
                 intrinsic=np.eye(4, dtype=np.float32),
                 lidar2img_aug=data_info['lidar2img_aug'],
-                lidar2img_extra=data_info['lidar2img_extra']
             ),
             ego2cam=data_info['ego2cam'],
             intrinsic=data_info['intrinsic'],

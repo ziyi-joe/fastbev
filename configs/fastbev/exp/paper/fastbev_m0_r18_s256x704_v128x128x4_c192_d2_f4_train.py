@@ -227,7 +227,7 @@ test_pipeline = [
 
 data = dict(
     samples_per_gpu=batch_size,
-    workers_per_gpu=4 if not local_mode else 0,
+    workers_per_gpu=16 if not local_mode else 0,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -237,11 +237,13 @@ data = dict(
         test_mode=False,
         with_box2d=False,
         box_type_3d='LiDAR',
-        ann_file='/root/ziyi/fastbev/data/nusc_beijing_waymo_data.pkl' if not local_mode else '/root/ziyi/fastbev/data/waymo_test_w_label.pkl',
+        ann_file=['/data1/ziyi/qirui_train.lmdb',
+                  '/data1/ziyi/beijing.lmdb',
+                  '/data1/ziyi/waymo.lmdb',] if not local_mode else '/root/ziyi/fastbev/data/fast_bev_beijing_test.pkl',
         load_interval=1,
         sequential=seq,
         n_times=n_time,
-        train_adj_ids=[1, 3, 5],
+        train_adj_ids=[0, 1, 2],
         speed_mode='abs_velo',
         max_interval=10,
         min_interval=0,
@@ -261,7 +263,7 @@ data = dict(
         test_mode=True,
         with_box2d=True,
         box_type_3d='LiDAR',
-        ann_file='/root/ziyi/fastbev/data/fast_bev_test.pkl' if not local_mode else '/root/ziyi/fastbev/data/fast_bev_test.pkl',
+        ann_file='/root/ziyi/fastbev/data/qirui_test.pkl' if not local_mode else '/root/ziyi/fastbev/data/qirui_test.pkl',
         load_interval=1,
         sequential=seq,
         n_times=n_time,
@@ -283,7 +285,7 @@ data = dict(
         test_mode=True,
         with_box2d=False,
         box_type_3d='LiDAR',
-        ann_file='/root/ziyi/fastbev/data/waymo_train_w_label.pkl' if not local_mode else '/root/ziyi/fastbev/data/waymo_test_w_label.pkl',
+        ann_file='/root/ziyi/fastbev/data/qirui_test.pkl' if not local_mode else '/root/ziyi/fastbev/data/qirui_test.pkl',
         load_interval=1,
         sequential=seq,
         n_times=n_time,
@@ -293,7 +295,7 @@ data = dict(
         min_interval=0,
         fix_direction=True,
         test_adj='prev',
-        test_adj_ids=[1, 3, 5],
+        test_adj_ids=[0,1,2],
         test_time_id=None,
     )
 )
@@ -322,7 +324,7 @@ lr_config = dict(
 #     by_epoch=False
 # )
 
-total_epochs = 30
+total_epochs = 10
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=10,
@@ -335,7 +337,7 @@ dist_params = dict(backend='nccl')
 find_unused_parameters = True  # todo: fix number of FPN outputs
 log_level = 'INFO'
 
-load_from = 'work_dirs/0319/epoch_30.pth'
+load_from = '/root/ziyi/fastbev/work_dirs/0414/epoch_5.pth'
 resume_from = None
 # resume_from = "/workspace/clean_up/fastbev/work_dirs/minjie/change_model_concat_load/epoch_2.pth"
 workflow = [('train', 1)]
