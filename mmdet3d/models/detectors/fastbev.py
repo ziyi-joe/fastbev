@@ -15,7 +15,6 @@ from mmcv.runner import get_dist_info, auto_fp16
 from ..losses import DiscriminativeLoss, BinaryFocalLoss
 
 import copy
-import onnxruntime
 
 from tools.utils import get_bboxes
 import numpy as np
@@ -49,7 +48,7 @@ class SegHead(nn.Module):
             nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
             nn.BatchNorm2d(feat_c),
             nn.ReLU(True),
-            nn.Conv2d(feat_c, 2, 1)
+            nn.Conv2d(feat_c, 3, 1)
         )
         self.embed = nn.Sequential(
             nn.Conv2d(feat_c, feat_c, 3, padding=1, bias=False),
@@ -450,7 +449,7 @@ class FastBEV(BaseDetector):
             loss_det = self.bbox_head.loss(*x, gt_bboxes_3d, gt_labels_3d, img_metas)
             losses.update(loss_det)
             # 计算lane loss
-            bev_map_loss_mask = (version==2)
+            bev_map_loss_mask = (version ==2) | (version ==3)
             if bev_map_loss_mask.any():
                 lane_seg_loss = 10.0 * self.lane_seg_loss(pred_bev_map[bev_map_loss_mask], kwargs['bev_map'][bev_map_loss_mask])
                 lane_emb_loss = 10.0 * self.lane_emb_loss(pred_embed[bev_map_loss_mask], kwargs['instance_map'][bev_map_loss_mask])

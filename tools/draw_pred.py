@@ -86,13 +86,13 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
     semantic_map = np.argmax(bev_map, axis=0)  # [200, 128]
 
     # 类别映射
-    category_map = {0: 'divider', 1: 'crossing'}
+    category_map = {0: 'dashed_lane', 1: 'crossing', 2:'solid_lane'}
 
     # 存储所有车道线向量
     lane_vectors = []
 
     # 对每个类别分别处理
-    cls_thr = [0.5, 0.45]
+    cls_thr = [0.5, 0.45, 0.5]
     for class_id, category_name in category_map.items():
         # 获取当前类别的mask
         # class_mask = (semantic_map == class_id)  # [200, 128]
@@ -135,7 +135,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
             points = pixel_to_ego_coords(inst_xs, inst_ys, voxel_size, pc_range)
             if len(points) < 5:
                 continue
-            if class_id == 0:
+            if class_id == 0 or class_id == 2:
                 ordered_points = fit_line_segment_pca(points)
             else:
                 # 对点进行排序，使其成为有序向量
@@ -424,7 +424,7 @@ def main():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     for i, data in tqdm(enumerate(data_loader)):
-        if i > 195:
+        if i > 500:
             break
         # breakpoint()
         intrinsic0 = data['intrinsic'][0].cpu().numpy()[0].astype(np.float32)
@@ -454,7 +454,7 @@ def main():
         for k in keys:
             cam_output[k] = [item[k] for item in final_output_list]
 
-        # 可视化gt
+        # # 可视化gt
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)
@@ -477,9 +477,9 @@ def main():
         ego2cam = data['ego2cam'][0]
         intrinsic0 = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
         bev_clr = {
-            "divider": [0, 255, 0],
+            "solid_lane": [0, 255, 0],
             "crossing": [255, 0, 0],
-            "curb": [0, 0, 255]
+            "dashed_lane": [0, 0, 255]
         }
         # 投影到前视图上可视化
         for vector in lane_vectors:
@@ -498,7 +498,7 @@ def main():
             points_camera = points_camera_3d / depths[:, None]
             points_img = (points_camera @ intrinsic0.T)[:, :2]
             h, w = front_img.shape[:2]
-            if vector['category'] == 'divider':
+            if vector['category'] in ['solid_lane', 'dashed_lane']:
                 p0 = points_img[0].astype(np.int64)
                 p1 = points_img[1].astype(np.int64)
                 ret, p0c, p1c = cv2.clipLine((0, 0, w, h), tuple(p0), tuple(p1))
@@ -525,7 +525,7 @@ def main():
         road_clr = [0, 255, 0]
         crossing_clr = [0, 255, 255]
         # bev_map = data['bev_map'][0].cpu().numpy()
-        # bev_vis[bev_map[2]>0.4] = tuple([int(0.6*x) for x in lane_clr]) # 红色
+        bev_vis[bev_map[2]>0.4] = tuple([int(0.6*x) for x in lane_clr]) # 红色
         bev_vis[bev_map[0]>0.45] = tuple([int(0.6*x) for x in road_clr]) # 绿色
         bev_vis[bev_map[1]>0.5] = tuple([int(0.6*x) for x in crossing_clr]) # 青色
         bev_vis = np.flip(bev_vis, 0)

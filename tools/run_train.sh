@@ -5,6 +5,6 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 torchrun --nproc_per_node=8 tools/train.py \
     ./configs/fastbev/exp/paper/fastbev_m0_r18_s256x704_v128x128x4_c192_d2_f4_train.py \
-    --work-dir=./work_dirs/0223/ \
+    --work-dir=./work_dirs/0510/ \
     --launcher="pytorch" \
     --gpus 8

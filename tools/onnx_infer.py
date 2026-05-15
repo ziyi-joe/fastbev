@@ -319,6 +319,49 @@ def project_2d_to_3d(mlvl_feat, img_metas, stride, voxel_size=None, n_voxels=Non
     return volume_list
 
 
+def is_ego_crossing_lane(lane_vectors, ego_half_width=1.0, x_range=(0.0, 5.0)):
+    """
+    判断自车是否压线。
+
+    在自车坐标系中，自车位于原点，x 为前向，y 为横向。
+    对每条 solid_lane / dashed_lane，将其折线段逐段插值，
+    若任意插值点满足：
+      - x 在 [0, x_range[1]] 内（自车正前方附近）
+      - |y| < ego_half_width（横向进入自车宽度范围）
+    则判定为压线。
+
+    Args:
+        lane_vectors: lane_postprocess 返回的向量列表，每项含
+                      'category' 和 'points' (Nx2, ego坐标系 (x,y))
+        ego_half_width: 自车半宽（米），默认 1.0 m
+        x_range: 纵向检测范围 (x_min, x_max)，默认检测自车正前方 0~5 m
+
+    Returns:
+        bool: True 表示压线，False 表示未压线
+    """
+    x_min, x_max = x_range
+    for vector in lane_vectors:
+        if vector['category'] not in ('solid_lane', 'dashed_lane'):
+            continue
+        points = vector['points']
+        if len(points) < 2:
+            continue
+        # 逐段线性插值，步长约 0.1 m
+        for k in range(len(points) - 1):
+            p0, p1 = points[k], points[k + 1]
+            seg_len = np.linalg.norm(p1 - p0)
+            if seg_len < 1e-6:
+                continue
+            n_steps = max(int(seg_len / 0.1), 1)
+            ts = np.linspace(0.0, 1.0, n_steps + 1)
+            interp = p0 + ts[:, None] * (p1 - p0)  # (n_steps+1, 2)
+            xs, ys = interp[:, 0], interp[:, 1]
+            mask = (xs >= x_min) & (xs <= x_max) & (np.abs(ys) < ego_half_width)
+            if np.any(mask):
+                return True
+    return False
+
+
 def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, -25.6),
                      cls_thr=None, min_pixel=3, dbscan_eps=0.45, dbscan_min_samples=5):
     """
@@ -347,10 +390,10 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
     semantic_map = np.argmax(bev_map, axis=0)  # [200, 128]
 
     # 类别映射
-    category_map = {0: 'divider', 1: 'crossing'}
+    category_map = {0: 'dashed_lane', 1: 'crossing', 2:'solid_lane'}
 
     if cls_thr is None:
-        cls_thr = [0.5, 0.45]
+        cls_thr = [0.5, 0.45, 0.5]
 
     # 存储所有车道线向量
     lane_vectors = []
@@ -398,7 +441,7 @@ def lane_postprocess(bev_map, instance_map, voxel_size=(0.5, 0.4), pc_range=(0, 
             points = pixel_to_ego_coords(inst_xs, inst_ys, voxel_size, pc_range)
             if len(points) < 5:
                 continue
-            if class_id == 0:
+            if class_id == 0 or class_id == 2:
                 ordered_points = fit_line_segment_pca(points)
             else:
                 # 对点进行排序，使其成为有序向量
@@ -594,8 +637,8 @@ def main():
     n_voxels = [200, 128, 4]
     voxel_size_3d = voxel_size_2d + [1.5]        # 补充z方向体素尺寸
 
-    onnx_2d = ort.InferenceSession("/data_nas/ziyi/onnx/0421_2d_model.onnx")
-    onnx_3d = ort.InferenceSession("/data_nas/ziyi/onnx/0421_3d_model.onnx")
+    onnx_2d = ort.InferenceSession("/data_nas/ziyi/onnx/0515_2d_model.onnx")
+    onnx_3d = ort.InferenceSession("/data_nas/ziyi/onnx/0515_3d_model.onnx")
 
     bbox_infos = deque([{}, {}, {}])
     ego_vels = deque([])
@@ -633,11 +676,11 @@ def main():
             # data['ego2cam'] = [np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam0.npy"),
             #                    np.load("/root/ziyi/product_e2e_demo-main-fastbev/fastbev/train/fastbev/work_dirs/ego2_cam1.npy")]
             # 重新计算外参
-            # for j in range(4):
-            #     img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2]
-            #     img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1]
-                # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
-                # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32) @ lidar2ego
+            for j in range(4):
+                # img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ data['ego2cam'][j*2]
+                # img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ data['ego2cam'][j*2+1]
+                img_metas["lidar2img"]["extrinsic"][j*2] = viewpad0 @ (data['ego2cam'][0] @ histego2curego_T[j]).astype(np.float32)
+                img_metas["lidar2img"]["extrinsic"][j*2+1] = viewpad1 @ (data['ego2cam'][1] @ histego2curego_T[j]).astype(np.float32)
 
         # 一阶段
         feat_2d = []
@@ -710,8 +753,9 @@ def main():
         # 因为画在原图上，此处要用resize前的内参
         real_intr = vis_info['cam_intrinsic'].cpu().numpy()[0].astype(np.float32)
         bev_clr = {
-            "divider": [0, 255, 0],
+            "solid_lane": [0, 255, 0],
             "crossing": [255, 0, 0],
+            "dashed_lane": [0, 0, 255]
         }
         # 投影到前视图上可视化
         for vector in lane_vectors:
@@ -730,7 +774,7 @@ def main():
             points_camera = points_camera_3d / depths[:, None]
             points_img = (points_camera @ real_intr.T)[:, :2]
             h, w = front_img.shape[:2]
-            if vector['category'] == 'divider':
+            if vector['category'] in ['solid_lane', 'dashed_lane']:
                 p0 = points_img[0].astype(np.int64)
                 p1 = points_img[1].astype(np.int64)
                 ret, p0c, p1c = cv2.clipLine((0, 0, w, h), tuple(p0), tuple(p1))
@@ -741,7 +785,10 @@ def main():
                     pt = point.astype(np.int64)
                     if 0 <= pt[0] < w and 0 <= pt[1] < h:
                         cv2.circle(front_img, tuple(pt), radius=5, color=bev_clr[vector['category']], thickness=-1)
-        
+        # 判断自车是否压线
+        cam_output['is_lane_crossing'] = is_ego_crossing_lane(lane_vectors)
+
+
         # gt_len = len(data['gt_bboxes_3d'].data[0][0].tensor)
         # result[0]['boxes_3d'] = data['gt_bboxes_3d'].data[0][0]
         # result[0]['scores_3d'] = torch.ones(gt_len)

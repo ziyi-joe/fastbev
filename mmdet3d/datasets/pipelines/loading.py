@@ -1046,6 +1046,8 @@ class PreparePnPInput(object):
             'road_line':0,
             'crosswalk': 1,
             'lane_divider': 0,
+            'dashed_lane': 0,
+            'solid_lane': 2
         }
         # print("ready for pnp input")
         # if local_mode:
@@ -1091,10 +1093,12 @@ class PreparePnPInput(object):
         return bev_map, instance_map
 
     def get_waymo_map(self, result):
-        bev_map = np.zeros((2, 200, 128), dtype=np.float32)
+        bev_map = np.zeros((3, 200, 128), dtype=np.float32)
         instance_map = np.zeros((1, 200, 128), dtype=np.float32)
         instance = 0
         for lane, lane_type in zip(result['lanes'], result['lane_types']):
+            if lane_type not in self.type2int:
+                continue
             x = np.round(lane[:, 0]/0.5).astype(np.int64)
             y = 64 + np.round(lane[:, 1]/0.4).astype(np.int64)
             # 只取自车附近
@@ -1111,11 +1115,11 @@ class PreparePnPInput(object):
 
 
     def __call__(self, result):
-        if result['version'] in [0, 1, 3, 4]:
-            result['bev_map'] = np.zeros((2, 200, 128), dtype=np.float32)
+        if result['version'] in [0, 1, 4]:
+            result['bev_map'] = np.zeros((3, 200, 128), dtype=np.float32)
             result['instance_map'] = np.zeros((1, 200, 128), dtype=np.float32)
             return result
-        elif result['version'] == 2:
+        elif result['version'] in [2, 3]:
             bev_map, instance_map = self.get_waymo_map(result)
             result['bev_map'] = bev_map
             # import cv2

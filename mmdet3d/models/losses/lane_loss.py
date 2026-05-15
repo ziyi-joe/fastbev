@@ -7,7 +7,7 @@ class BinaryFocalLoss(nn.Module):
         super(BinaryFocalLoss, self).__init__()
         self.gamma = gamma
         # 针对严重漏检，将 alpha 调高，偏向正样本（车道线/边界）
-        self.alpha = torch.tensor([[0.8, 0.8]]) 
+        self.alpha = torch.tensor([[0.8, 0.8, 0.8]]) 
         self.reduction = reduction
         self.loss_weight = loss_weight
 
